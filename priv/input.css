@@ -1,0 +1,174 @@
+@import "tailwindcss";
+@source "../src/**/*.gleam";
+
+@theme {
+  --color-yellow: #FFE500;
+  --color-pink: #FF6B9D;
+  --color-teal: #4ECDC4;
+  --color-orange: #FF8A5C;
+  --color-lime: #BFFF00;
+  --color-surface: #FAFAFA;
+  --color-ink: #1A1A1A;
+
+  --shadow-brutal: 4px 4px 0px #1A1A1A;
+  --shadow-brutal-sm: 2px 2px 0px #1A1A1A;
+
+  --font-heading: "Bricolage Grotesque", sans-serif;
+  --font-body: "DM Sans", sans-serif;
+}
+
+/* Noise texture background */
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    font-family: var(--font-body);
+    color: var(--color-ink);
+    background-color: #F0EDE6;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    text-wrap: balance;
+  }
+
+  p, li, label, span {
+    text-wrap: pretty;
+  }
+}
+
+/* Neobrutalist button base */
+@utility btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  min-height: 2.5rem;
+  min-width: 2.5rem;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 0.875rem;
+  border: 3px solid var(--color-ink);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-brutal);
+  cursor: pointer;
+  transition-property: transform, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+  user-select: none;
+  position: relative;
+}
+
+@utility btn-yellow {
+  background: var(--color-yellow);
+}
+
+@utility btn-pink {
+  background: var(--color-pink);
+}
+
+@utility btn-teal {
+  background: var(--color-teal);
+}
+
+@utility btn-lime {
+  background: var(--color-lime);
+}
+
+@utility btn-ghost {
+  background: transparent;
+  box-shadow: none;
+  border: 3px solid transparent;
+}
+
+@utility btn-icon {
+  background: var(--color-surface);
+  box-shadow: var(--shadow-brutal);
+}
+
+/* Button interaction states */
+@layer utilities {
+  .btn:hover {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0px #1A1A1A;
+  }
+
+  .btn:active {
+    transform: translate(2px, 2px) scale(0.96);
+    box-shadow: 2px 2px 0px #1A1A1A;
+  }
+
+  .btn-ghost:hover {
+    transform: none;
+    box-shadow: none;
+    background: rgba(26, 26, 26, 0.08);
+  }
+
+  .btn-ghost:active {
+    transform: scale(0.96);
+    box-shadow: none;
+  }
+
+  .btn-ghost.border-ink:hover {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0px #1A1A1A;
+    background: transparent;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: var(--shadow-brutal);
+  }
+
+  .input-brutal:focus {
+    box-shadow: 4px 4px 0px #1A1A1A;
+  }
+}
+
+@utility card {
+  background: var(--color-surface);
+  border: 3px solid var(--color-ink);
+  box-shadow: var(--shadow-brutal);
+}
+
+@utility input-brutal {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  min-height: 2.75rem;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  border: 3px solid var(--color-ink);
+  background: white;
+  color: var(--color-ink);
+  outline: none;
+  transition-property: box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+/* Staggered page load animation */
+@keyframes fadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@utility stagger-in {
+  animation: fadeSlideIn 400ms ease-out both;
+}

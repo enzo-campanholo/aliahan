@@ -22,3 +22,18 @@ Further documentation can be found at <https://hexdocs.pm/aliahan>.
 gleam run   # Run the project
 gleam test  # Run the tests
 ```
+
+The checked-in `priv/app.css` keeps `gleam run` styled on a clean checkout.
+If you change `priv/input.css`, regenerate the compiled stylesheet with:
+
+```sh
+pnpm run build:css
+pnpm run watch:css  # Optional while iterating on styles
+```
+
+The Alpine runtime is also checked in under `priv/` so the UI works offline.
+If you upgrade Alpine, refresh the vendored bundle with:
+
+```sh
+pnpm run vendor:alpine
+```

@@ -42,9 +42,16 @@ pub type NewCourseInput {
 
 pub type UpdateCourseInput {
   UpdateCourseInput(
-    name: String,
-    deadline: calendar.Date,
-    prerequisites: List(String),
+    name: Option(String),
+    deadline: Option(calendar.Date),
+    prerequisites: Option(List(String)),
+  )
+}
+
+pub type SettingsPatch {
+  SettingsPatch(
+    include_weekends: Option(Bool),
+    deadline_slack_days: Option(Int),
   )
 }
 

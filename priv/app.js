@@ -1,11 +1,6 @@
 "use strict";
 
-const state = {
-  view: "week",
-  anchor: null,
-  data: null,
-  error: "",
-};
+// ── API Layer ──────────────────────────────────────────
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -19,357 +14,854 @@ async function api(path, options = {}) {
   return payload.data;
 }
 
-async function loadBootstrap() {
-  const params = new URLSearchParams({ view: state.view, anchor: state.anchor || todayIso() });
-  state.data = await api(`/api/bootstrap?${params.toString()}`, { method: "GET" });
-  state.anchor = state.data.schedule.anchor;
-}
-
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function splitCsv(value) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function splitLines(value) {
-  return value
-    .split("\n")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
 function shiftAnchor(anchor, view, delta) {
-  const date = new Date(`${anchor}T00:00:00`);
+  const d = new Date(`${anchor}T00:00:00`);
   if (view === "month") {
-    date.setMonth(date.getMonth() + delta);
+    d.setMonth(d.getMonth() + delta);
   } else {
-    date.setDate(date.getDate() + (delta * 7));
+    d.setDate(d.getDate() + delta * 7);
   }
-  return date.toISOString().slice(0, 10);
+  return d.toISOString().slice(0, 10);
 }
 
-function monthPrefix(anchor) {
-  return anchor.slice(0, 7);
-}
+// Vendor color palette and persistence
+const VENDOR_COLORS = ["#FF6B9D", "#4ECDC4", "#FF8A5C", "#FFE500", "#BFFF00", "#C4A1FF", "#FF4444", "#44BBFF"];
+const VENDOR_COLOR_KEY = "aliahan_vendor_colors_v2";
+const vendorColors = loadVendorColors();
 
-function renderCalendar(schedule) {
-  const days = schedule.days;
-  if (schedule.view === "month") {
-    const rows = [];
-    for (let i = 0; i < days.length; i += 7) {
-      rows.push(days.slice(i, i + 7));
-    }
-    return `
-      <table>
-        <thead>
-          <tr>${["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((label) => `<th>${label}</th>`).join("")}</tr>
-        </thead>
-        <tbody>
-          ${rows.map((row) => `<tr>${row.map((day) => renderDayCell(day, monthPrefix(schedule.anchor))).join("")}</tr>`).join("")}
-        </tbody>
-      </table>
-    `;
+function normalizeVendorColors(value) {
+  const colors = Object.create(null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return colors;
+  for (const [vendorName, color] of Object.entries(value)) {
+    if (typeof color === "string") colors[vendorName] = color;
   }
-
-  return `
-    <table>
-      <thead>
-        <tr>${days.map((day) => `<th>${escapeHtml(day.label)}</th>`).join("")}</tr>
-      </thead>
-      <tbody>
-        <tr>${days.map((day) => renderDayCell(day, null)).join("")}</tr>
-      </tbody>
-    </table>
-  `;
+  return colors;
 }
 
-function renderDayCell(day, activeMonth) {
-  const muted = activeMonth && !day.date.startsWith(activeMonth) ? " style=\"opacity:0.6\"" : "";
-  return `
-    <td${muted}>
-      <div>${escapeHtml(day.date)}</div>
-      <ul>
-        ${day.entries.map((entry) => `
-          <li>
-            <div>${escapeHtml(entry.vendor_name)} / ${escapeHtml(entry.course_name)}</div>
-            <div>${escapeHtml(entry.module_name)}</div>
-            <button data-action="toggle-complete" data-module-id="${entry.module_id}" data-completed="true">Mark done</button>
-          </li>
-        `).join("")}
-      </ul>
-    </td>
-  `;
-}
-
-function renderCourseCard(vendor, course) {
-  const prerequisites = course.prerequisites.join(", ");
-  return `
-    <div class="course-card">
-      <h4>${escapeHtml(course.name)}</h4>
-      <div>Vendor: ${escapeHtml(vendor.name)}</div>
-      <form data-action="update-course" data-course-id="${course.id}">
-        <div><label>Name <input name="name" value="${escapeHtml(course.name)}"></label></div>
-        <div><label>Deadline <input type="date" name="deadline_date" value="${escapeHtml(course.deadline_date)}"></label></div>
-        <div><label>Prerequisites <input name="prerequisites" value="${escapeHtml(prerequisites)}"></label></div>
-        <button type="submit">Save course</button>
-        <button type="button" data-action="delete-course" data-course-id="${course.id}">Delete course</button>
-      </form>
-      <ul>
-        ${course.modules.map((module) => `
-          <li class="${module.completed_at ? "done" : ""}">
-            <form data-action="update-module" data-module-id="${module.id}">
-              <input name="name" value="${escapeHtml(module.name)}">
-              <span>Position ${module.position}</span>
-              <span>${module.completed_at ? `Completed ${escapeHtml(module.completed_at)}` : (module.scheduled_date ? `Scheduled ${escapeHtml(module.scheduled_date)}` : "Unscheduled")}</span>
-              <button type="submit">Save</button>
-              <button type="button" data-action="toggle-complete" data-module-id="${module.id}" data-completed="${module.completed_at ? "false" : "true"}">
-                ${module.completed_at ? "Mark undone" : "Mark done"}
-              </button>
-              <button type="button" data-action="delete-module" data-module-id="${module.id}">Delete</button>
-            </form>
-          </li>
-        `).join("")}
-      </ul>
-      <form data-action="add-module" data-course-id="${course.id}">
-        <input name="name" placeholder="New module name">
-        <button type="submit">Add module</button>
-      </form>
-    </div>
-  `;
-}
-
-function renderApp() {
-  const root = document.getElementById("app");
-  if (!state.data) {
-    root.innerHTML = "<p>Loading...</p>";
-    return;
-  }
-
-  const { settings, vendors, conflicts, schedule, today } = state.data;
-  root.innerHTML = `
-    <section>
-      <div class="error">${escapeHtml(state.error || "")}</div>
-      <div>
-        <button data-action="prev-period">Previous</button>
-        <button data-action="next-period">Next</button>
-        <button data-action="go-today">Today</button>
-        <button data-action="toggle-view">${schedule.view === "week" ? "Month view" : "Week view"}</button>
-      </div>
-      <div>Today: ${escapeHtml(today)}</div>
-      <label>
-        <input type="checkbox" id="include-weekends" ${settings.include_weekends ? "checked" : ""}>
-        Include weekends
-      </label>
-      <label>
-        Deadline slack days
-        <input
-          type="number"
-          id="deadline-slack-days"
-          min="0"
-          value="${settings.deadline_slack_days}"
-        >
-      </label>
-      <div>${renderCalendar(schedule)}</div>
-    </section>
-
-    <section>
-      <h2>Conflicts</h2>
-      <ul>
-        ${conflicts.map((conflict) => `<li>${escapeHtml(conflict.vendor_name)} / ${escapeHtml(conflict.course_name)}: ${escapeHtml(conflict.message)}</li>`).join("") || "<li>None</li>"}
-      </ul>
-    </section>
-
-    <section>
-      <h2>Vendors</h2>
-      <form data-action="create-vendor">
-        <input name="name" placeholder="Vendor name">
-        <button type="submit">Add vendor</button>
-      </form>
-
-      <form data-action="create-course">
-        <div>
-          <label>Vendor
-            <select name="vendor_id">
-              ${vendors.map((vendor) => `<option value="${vendor.id}">${escapeHtml(vendor.name)}</option>`).join("")}
-            </select>
-          </label>
-        </div>
-        <div><label>Course name <input name="name"></label></div>
-        <div><label>Deadline <input type="date" name="deadline_date" value="${escapeHtml(today)}"></label></div>
-        <div><label>Prerequisites <input name="prerequisites" placeholder="Comma separated"></label></div>
-        <div>
-          <label>Module mode
-            <select name="mode">
-              <option value="explicit">Explicit list</option>
-              <option value="range">Generated range</option>
-            </select>
-          </label>
-        </div>
-        <div><label>Modules <textarea name="modules" rows="4" cols="40" placeholder="One module per line"></textarea></label></div>
-        <div><label>Range prefix <input name="range_prefix" value="Module "></label></div>
-        <div><label>Range start <input type="number" name="range_start" value="1"></label></div>
-        <div><label>Range end <input type="number" name="range_end" value="5"></label></div>
-        <button type="submit">Add course</button>
-      </form>
-
-      ${vendors.map((vendor) => `
-        <section>
-          <h3>${escapeHtml(vendor.name)}</h3>
-          ${vendor.courses.length === 0 ? `<button data-action="delete-vendor" data-vendor-id="${vendor.id}">Delete empty vendor</button>` : ""}
-          ${vendor.courses.map((course) => renderCourseCard(vendor, course)).join("")}
-        </section>
-      `).join("")}
-    </section>
-  `;
-}
-
-async function refresh() {
-  state.error = "";
+function loadVendorColors() {
   try {
-    await loadBootstrap();
-  } catch (error) {
-    state.error = error.message;
+    return normalizeVendorColors(JSON.parse(localStorage.getItem(VENDOR_COLOR_KEY)));
+  } catch {
+    return Object.create(null);
   }
-  renderApp();
 }
 
-async function mutate(path, options) {
-  state.error = "";
+function saveVendorColors(map) {
   try {
-    await api(path, options);
-    await loadBootstrap();
-  } catch (error) {
-    state.error = error.message;
+    localStorage.setItem(VENDOR_COLOR_KEY, JSON.stringify(map));
+    return true;
+  } catch {
+    return false;
   }
-  renderApp();
 }
 
-document.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.target;
-  const action = form.dataset.action;
-  const data = new FormData(form);
+function getVendorColor(vendorName) {
+  if (!Object.prototype.hasOwnProperty.call(vendorColors, vendorName)) return null;
+  const color = vendorColors[vendorName];
+  return typeof color === "string" ? color : null;
+}
 
-  if (action === "create-vendor") {
-    await mutate("/api/vendors", {
-      method: "POST",
-      body: JSON.stringify({ name: data.get("name") }),
-    });
+function setVendorColor(vendorName, color) {
+  vendorColors[vendorName] = color;
+  saveVendorColors(vendorColors);
+  if (typeof Alpine !== "undefined") {
+    const ui = Alpine.store("ui");
+    if (ui) ui.vendorColorRevision += 1;
   }
+}
 
-  if (action === "create-course") {
-    const mode = data.get("mode");
-    const payload = {
-      vendor_id: Number(data.get("vendor_id")),
-      name: data.get("name"),
-      deadline_date: data.get("deadline_date"),
-      prerequisites: splitCsv(data.get("prerequisites") || ""),
-    };
-    if (mode === "range") {
-      payload.module_range = {
-        prefix: data.get("range_prefix"),
-        start: Number(data.get("range_start")),
-        end: Number(data.get("range_end")),
+// Fallback: deterministic color from name (used when no explicit color set)
+function vendorColorFallback(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return VENDOR_COLORS[Math.abs(hash) % VENDOR_COLORS.length];
+}
+
+// Resolve vendor color: explicit pick (by name) > fallback hash
+function resolveVendorColor(vendorName) {
+  const explicit = getVendorColor(vendorName);
+  if (explicit) return explicit;
+  return vendorColorFallback(vendorName);
+}
+
+// ── Toast helper ───────────────────────────────────────
+
+let toastId = 0;
+function showToast(message, type = "info") {
+  const id = ++toastId;
+  const toast = { id, message, type, visible: true };
+  Alpine.store("ui").toasts.push(toast);
+  setTimeout(() => {
+    toast.visible = false;
+    setTimeout(() => {
+      const toasts = Alpine.store("ui").toasts;
+      const idx = toasts.findIndex((t) => t.id === id);
+      if (idx !== -1) toasts.splice(idx, 1);
+    }, 300);
+  }, 3000);
+}
+
+// ── Confirm dialog helper ──────────────────────────────
+
+function requestConfirm(message) {
+  return new Promise((resolve) => {
+    Alpine.store("ui").confirmDialog = { message, resolve };
+  });
+}
+
+// ── Alpine Stores ──────────────────────────────────────
+
+document.addEventListener("alpine:init", () => {
+  // App data store
+  Alpine.store("app", {
+    data: null,
+    view: "week",
+    anchor: null,
+    loading: false,
+    error: "",
+    _bootstrapRequestId: 0,
+    _loadingRequestId: 0,
+
+    today() {
+      return this.data?.today || todayIso();
+    },
+
+    async loadBootstrap({ showLoading = false, view = this.view, anchor = this.anchor || todayIso() } = {}) {
+      const requestId = ++this._bootstrapRequestId;
+      const targetAnchor = anchor || todayIso();
+      this.error = "";
+      this.view = view;
+      this.anchor = targetAnchor;
+      if (showLoading) {
+        this.loading = true;
+        this._loadingRequestId = requestId;
+      }
+      try {
+        const params = new URLSearchParams({
+          view,
+          anchor: targetAnchor,
+        });
+        const data = await api(`/api/bootstrap?${params}`);
+        if (requestId !== this._bootstrapRequestId) return true;
+        this.data = data;
+        this.view = data.schedule.view;
+        this.anchor = data.schedule.anchor;
+        this.error = "";
+        return true;
+      } catch (e) {
+        if (requestId !== this._bootstrapRequestId) return true;
+        const schedule = this.data?.schedule;
+        if (schedule) {
+          this.view = schedule.view;
+          this.anchor = schedule.anchor;
+        }
+        this.error = e.message;
+        showToast(e.message, "error");
+        return false;
+      } finally {
+        if (showLoading && requestId === this._loadingRequestId) {
+          this.loading = false;
+          this._loadingRequestId = 0;
+        }
+      }
+    },
+
+    async init() {
+      return await this.loadBootstrap({
+        showLoading: true,
+        view: this.view,
+        anchor: this.anchor || todayIso(),
+      });
+    },
+
+    async refresh() {
+      return await this.loadBootstrap({
+        view: this.view,
+        anchor: this.anchor || todayIso(),
+      });
+    },
+
+    async mutate(path, options) {
+      this.error = "";
+      try {
+        await api(path, options);
+        await this.refresh();
+        return true;
+      } catch (e) {
+        this.error = e.message;
+        showToast(e.message, "error");
+        return false;
+      }
+    },
+  });
+
+  // UI state store
+  Alpine.store("ui", {
+    tab: "schedule",
+    settingsOpen: false,
+    conflictsOpen: false,
+    expandedVendors: [],
+    vendorColorRevision: 0,
+    modalOpen: false,
+    confirmDialog: null,
+    toasts: [],
+  });
+
+  // ── Components ─────────────────────────────────────
+
+  // Calendar grid
+  Alpine.data("calendarGrid", () => ({
+    popover: { open: false, entry: null, entries: [], completing: false },
+    _fading: false,
+    _fadeRequestId: 0,
+
+    get schedule() {
+      const s = Alpine.store("app").data?.schedule;
+      // Set --month-rows CSS variable for month grid
+      if (s?.days && Alpine.store("app").view === "month") {
+        const rows = Math.ceil(s.days.length / 7);
+        document.documentElement.style.setProperty("--month-rows", String(rows));
+      }
+      return s;
+    },
+
+    get periodLabel() {
+      const s = this.schedule;
+      if (!s) return "";
+      if (Alpine.store("app").view === "month") {
+        const d = new Date(`${s.anchor}T00:00:00`);
+        return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+      }
+      const start = new Date(`${s.period_start}T00:00:00`);
+      const end = new Date(`${s.period_end}T00:00:00`);
+      const opts = { month: "short", day: "numeric" };
+      const yearOpts = { month: "short", day: "numeric", year: "numeric" };
+      if (start.getFullYear() !== end.getFullYear()) {
+        return start.toLocaleDateString("en-US", yearOpts) + " — " + end.toLocaleDateString("en-US", yearOpts);
+      }
+      return start.toLocaleDateString("en-US", opts) + " — " + end.toLocaleDateString("en-US", yearOpts);
+    },
+
+    // Fade out, run action while invisible, fade back in
+    async _withFade(fn) {
+      const fadeRequestId = ++this._fadeRequestId;
+      this._fading = true;
+      await new Promise((r) => setTimeout(r, 140));
+      try {
+        await fn();
+      } finally {
+        if (fadeRequestId === this._fadeRequestId) this._fading = false;
+      }
+    },
+
+    dayLabel(dateStr) {
+      const d = new Date(`${dateStr}T00:00:00`);
+      return d.toLocaleDateString("en-US", { weekday: "short" });
+    },
+
+    dayNum(dateStr) {
+      return parseInt(dateStr.split("-")[2], 10);
+    },
+
+    isToday(dateStr) {
+      return dateStr === Alpine.store("app").today();
+    },
+
+    isCurrentMonth(dateStr) {
+      const anchor = this.schedule?.anchor;
+      if (!anchor) return true;
+      return dateStr.slice(0, 7) === anchor.slice(0, 7);
+    },
+
+    vendorColor(name) {
+      void Alpine.store("ui").vendorColorRevision;
+      return resolveVendorColor(name);
+    },
+
+    resetPopover() {
+      this.popover = { open: false, entry: null, entries: [], completing: false };
+    },
+
+    selectPopoverEntry(entry) {
+      if (!entry || this.popover.completing) return;
+      this.popover.entry = entry;
+    },
+
+    setView(view) {
+      this.resetPopover();
+      this._withFade(async () => {
+        const app = Alpine.store("app");
+        await app.loadBootstrap({
+          view,
+          anchor: app.anchor || todayIso(),
+        });
+      });
+    },
+
+    prev() {
+      this.resetPopover();
+      this._withFade(async () => {
+        const app = Alpine.store("app");
+        await app.loadBootstrap({
+          view: app.view,
+          anchor: shiftAnchor(app.anchor || todayIso(), app.view, -1),
+        });
+      });
+    },
+
+    next() {
+      this.resetPopover();
+      this._withFade(async () => {
+        const app = Alpine.store("app");
+        await app.loadBootstrap({
+          view: app.view,
+          anchor: shiftAnchor(app.anchor || todayIso(), app.view, 1),
+        });
+      });
+    },
+
+    goToday() {
+      this.resetPopover();
+      this._withFade(async () => {
+        const app = Alpine.store("app");
+        await app.loadBootstrap({
+          view: app.view,
+          anchor: app.today(),
+        });
+      });
+    },
+
+    openPopover(entries, entry = entries?.[0]) {
+      if (!entries?.length || !entry) return;
+      this.popover = {
+        open: true,
+        entry,
+        entries: entries.slice(),
+        completing: false,
       };
-    } else {
-      payload.modules = splitLines(data.get("modules") || "");
-    }
-    await mutate("/api/courses", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  }
+    },
 
-  if (action === "update-course") {
-    await mutate(`/api/courses/${form.dataset.courseId}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        name: data.get("name"),
-        deadline_date: data.get("deadline_date"),
-        prerequisites: splitCsv(data.get("prerequisites") || ""),
-      }),
-    });
-  }
+    async markDone(moduleId) {
+      if (!moduleId || this.popover.completing) return;
+      this.popover.completing = true;
+      const ok = await Alpine.store("app").mutate(`/api/modules/${moduleId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ completed: true }),
+      });
+      if (ok) {
+        showToast("Module completed!", "success");
+        this.resetPopover();
+        return;
+      }
+      this.popover.completing = false;
+    },
+  }));
 
-  if (action === "add-module") {
-    await mutate(`/api/courses/${form.dataset.courseId}/modules`, {
-      method: "POST",
-      body: JSON.stringify({ name: data.get("name") }),
-    });
-  }
+  // Settings panel
+  Alpine.data("settingsPanel", () => ({
+    currentSettings() {
+      return Alpine.store("app").data?.settings || null;
+    },
 
-  if (action === "update-module") {
-    await mutate(`/api/modules/${form.dataset.moduleId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ name: data.get("name") }),
-    });
-  }
+    async toggleWeekends(event) {
+      if (!this.currentSettings()) return;
+      const app = Alpine.store("app");
+      const includeWeekends = !!event.target.checked;
+      const ok = await app.mutate("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          include_weekends: includeWeekends,
+        }),
+      });
+      if (!ok) {
+        const settings = this.currentSettings();
+        if (settings) {
+          event.target.checked = !!settings.include_weekends;
+        }
+      }
+    },
+
+    async updateSlackDays(event) {
+      if (!this.currentSettings()) return;
+      const app = Alpine.store("app");
+      const deadlineSlackDays = Math.max(0, Number(event.target.value) || 0);
+      const ok = await app.mutate("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          deadline_slack_days: deadlineSlackDays,
+        }),
+      });
+      if (!ok) {
+        const settings = this.currentSettings();
+        if (settings) {
+          event.target.value = String(settings.deadline_slack_days);
+        }
+      }
+    },
+  }));
+
+  // Vendor form
+  Alpine.data("vendorForm", () => ({
+    vendorName: "",
+
+    async create() {
+      const name = this.vendorName.trim();
+      if (!name) return;
+      const ok = await Alpine.store("app").mutate("/api/vendors", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+      if (ok) {
+        this.vendorName = "";
+        showToast("Vendor created", "success");
+      }
+    },
+  }));
+
+  // Confirm dialog
+  Alpine.data("confirmDialog", () => ({
+    confirm() {
+      const dialog = Alpine.store("ui").confirmDialog;
+      if (dialog?.resolve) dialog.resolve(true);
+      Alpine.store("ui").confirmDialog = null;
+    },
+    cancel() {
+      const dialog = Alpine.store("ui").confirmDialog;
+      if (dialog?.resolve) dialog.resolve(false);
+      Alpine.store("ui").confirmDialog = null;
+    },
+  }));
+
+  // Course creation modal
+  Alpine.data("courseModal", () => ({
+    submitting: false,
+    form: {
+      vendor_id: "",
+      name: "",
+      deadline_date: Alpine.store("app").today(),
+      prerequisites: "",
+      mode: "explicit",
+      modules: "",
+      range_prefix: "Module ",
+      range_start: 1,
+      range_end: 5,
+    },
+
+    init() {
+      const vendors = Alpine.store("app").data?.vendors || [];
+      if (vendors.length > 0 && !this.form.vendor_id) {
+        this.form.vendor_id = vendors[0].id;
+      }
+    },
+
+    close() {
+      Alpine.store("ui").modalOpen = false;
+    },
+
+    async submit() {
+      if (this.submitting) return;
+      this.submitting = true;
+
+      const payload = {
+        vendor_id: Number(this.form.vendor_id),
+        name: this.form.name,
+        deadline_date: this.form.deadline_date,
+        prerequisites: this.form.prerequisites
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      };
+
+      if (this.form.mode === "range") {
+        payload.module_range = {
+          prefix: this.form.range_prefix,
+          start: Number(this.form.range_start),
+          end: Number(this.form.range_end),
+        };
+      } else {
+        payload.modules = this.form.modules
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+
+      const ok = await Alpine.store("app").mutate("/api/courses", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      this.submitting = false;
+      if (ok) {
+        this.close();
+        showToast("Course created", "success");
+      }
+    },
+  }));
+
+  // Manage tab (vendor accordions)
+  Alpine.data("manageTab", () => ({
+    vendorPalette: VENDOR_COLORS,
+
+    toggleVendor(vendorId) {
+      const ui = Alpine.store("ui");
+      const idx = ui.expandedVendors.indexOf(vendorId);
+      if (idx === -1) {
+        ui.expandedVendors.push(vendorId);
+      } else {
+        ui.expandedVendors.splice(idx, 1);
+      }
+    },
+
+    isVendorExpanded(vendorId) {
+      return Alpine.store("ui").expandedVendors.includes(vendorId);
+    },
+
+    getVendorColor(vendorName) {
+      void Alpine.store("ui").vendorColorRevision;
+      const explicit = getVendorColor(vendorName);
+      if (explicit) return explicit;
+      return vendorName ? vendorColorFallback(vendorName) : VENDOR_COLORS[0];
+    },
+
+    setVendorColor(vendorName, color) {
+      setVendorColor(vendorName, color);
+    },
+
+    async deleteVendor(vendorId, vendorName) {
+      const vendors = Alpine.store("app").data?.vendors || [];
+      const vendor = vendors.find((candidate) => candidate.id === vendorId);
+      const resolvedName = vendor?.name || vendorName;
+      const courseCount = vendor?.courses.length || 0;
+      const moduleCount =
+        vendor?.courses.reduce((count, course) => count + course.modules.length, 0) || 0;
+      const message =
+        courseCount > 0
+          ? `Delete vendor "${resolvedName}"? This will also permanently delete ${courseCount} course${courseCount === 1 ? "" : "s"} and ${moduleCount} module${moduleCount === 1 ? "" : "s"}.`
+          : `Delete vendor "${resolvedName}"?`;
+      const confirmed = await requestConfirm(message);
+      if (!confirmed) return;
+      const ok = await Alpine.store("app").mutate(`/api/vendors/${vendorId}`, {
+        method: "DELETE",
+      });
+      if (ok) {
+        showToast("Vendor deleted", "info");
+      }
+    },
+  }));
+
+  // Course card (manage tab)
+  // Uses reactive getters to always read fresh data from the store,
+  // avoiding stale closure references after refresh().
+  Alpine.data("courseCard", (initCourse, initVendor) => ({
+    _courseId: initCourse.id,
+    _vendorId: initVendor.id,
+    editing: { name: false, deadline: false, prerequisites: false },
+    prerequisiteDraft: "",
+    editingModuleId: null,
+    moduleNameDraft: "",
+    newModuleName: "",
+    _dragIndex: null,
+    _draggedId: null,
+    _dragSnapshot: null,
+    _dropHandled: false,
+    _saving: false,
+    _moduleCompletionPending: Object.create(null),
+
+    // Reactive getter: always returns fresh course from store
+    get course() {
+      const data = Alpine.store("app").data;
+      if (!data) return null;
+      for (const v of data.vendors) {
+        const c = v.courses.find((c) => c.id === this._courseId);
+        if (c) return c;
+      }
+      return null;
+    },
+
+    get vendor() {
+      const data = Alpine.store("app").data;
+      if (!data) return null;
+      return data.vendors.find((v) => v.id === this._vendorId) || null;
+    },
+
+    dragStart(event, index) {
+      if (this._saving) {
+        event.preventDefault();
+        return;
+      }
+      const course = this.course;
+      if (!course) return;
+      this._dragIndex = index;
+      this._draggedId = course.modules[index]?.id;
+      this._dragSnapshot = course.modules.slice();
+      this._dropHandled = false;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", "");
+      requestAnimationFrame(() => {
+        event.target.style.opacity = "0.3";
+      });
+    },
+
+    dragOver(event, index) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      if (this._dragIndex === null || this._dragIndex === index) return;
+      const course = this.course;
+      if (!course) return;
+      const modules = course.modules;
+      const [item] = modules.splice(this._dragIndex, 1);
+      modules.splice(index, 0, item);
+      this._dragIndex = index;
+    },
+
+    async drop(event) {
+      event.preventDefault();
+      if (this._saving) return;
+      this._dropHandled = true;
+      this._saving = true;
+      const dragSnapshot = this._dragSnapshot ? this._dragSnapshot.slice() : null;
+      const course = this.course;
+      if (!course || !dragSnapshot) {
+        this._dragSnapshot = null;
+        this._dropHandled = false;
+        this._saving = false;
+        return;
+      }
+      const modules = course.modules;
+      const ok = await Alpine.store("app").mutate(`/api/courses/${course.id}/modules`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          module_ids: modules.map((m) => m.id),
+        }),
+      });
+      if (ok) {
+        showToast("Modules reordered", "success");
+      } else {
+        this.restoreDragSnapshot(dragSnapshot);
+        await Alpine.store("app").refresh();
+      }
+      this._dragSnapshot = null;
+      this._dropHandled = false;
+      this._saving = false;
+    },
+
+    dragEnd() {
+      if (!this._dropHandled) {
+        this.restoreDragSnapshot();
+      }
+      this._dragIndex = null;
+      this._draggedId = null;
+      if (!this._saving) {
+        this._dragSnapshot = null;
+        this._dropHandled = false;
+      }
+      document.querySelectorAll("[draggable=true]").forEach((el) => {
+        el.style.opacity = "";
+      });
+    },
+
+    restoreDragSnapshot(snapshot = this._dragSnapshot) {
+      const course = this.course;
+      if (!course || !snapshot) return;
+      course.modules.splice(0, course.modules.length, ...snapshot);
+    },
+
+    get completedCount() {
+      const course = this.course;
+      if (!course) return 0;
+      return course.modules.filter((m) => m.completed_at).length;
+    },
+
+    get progressPct() {
+      const course = this.course;
+      if (!course || course.modules.length === 0) return 0;
+      return Math.round(
+        (course.modules.filter((m) => m.completed_at).length / course.modules.length) * 100
+      );
+    },
+
+    isModuleCompletionSaving(moduleId) {
+      return Object.prototype.hasOwnProperty.call(this._moduleCompletionPending, moduleId);
+    },
+
+    formatDate(dateStr) {
+      if (!dateStr) return "No deadline";
+      const d = new Date(`${dateStr}T00:00:00`);
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    },
+
+    parsePrerequisites(value) {
+      return value
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    },
+
+    samePrerequisites(left, right) {
+      return left.join("\n") === right.join("\n");
+    },
+
+    async persistCourse(changes = {}) {
+      const course = this.course;
+      if (!course) return false;
+      return Alpine.store("app").mutate(`/api/courses/${course.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+    },
+
+    async saveName(newName) {
+      if (!this.editing.name) return;
+      const course = this.course;
+      const trimmed = newName.trim();
+      if (!course || trimmed === course.name || !trimmed) {
+        this.editing.name = false;
+        return;
+      }
+      const ok = await this.persistCourse({ name: trimmed });
+      if (ok) {
+        this.editing.name = false;
+      }
+    },
+
+    async saveDeadline(newDate) {
+      if (!this.editing.deadline) return;
+      const course = this.course;
+      if (!course || newDate === course.deadline_date || !newDate) {
+        this.editing.deadline = false;
+        return;
+      }
+      const ok = await this.persistCourse({ deadline_date: newDate });
+      if (ok) {
+        this.editing.deadline = false;
+      }
+    },
+
+    startPrerequisitesEdit() {
+      const course = this.course;
+      if (!course) return;
+      this.prerequisiteDraft = course.prerequisites.join(", ");
+      this.editing.prerequisites = true;
+    },
+
+    cancelPrerequisitesEdit() {
+      const course = this.course;
+      this.prerequisiteDraft = course ? course.prerequisites.join(", ") : "";
+      this.editing.prerequisites = false;
+    },
+
+    async savePrerequisites(value) {
+      if (!this.editing.prerequisites) return;
+      const course = this.course;
+      if (!course) return;
+      const prerequisites = this.parsePrerequisites(value);
+      if (this.samePrerequisites(prerequisites, course.prerequisites)) {
+        this.cancelPrerequisitesEdit();
+        return;
+      }
+      const ok = await this.persistCourse({ prerequisites });
+      if (ok) {
+        this.prerequisiteDraft = prerequisites.join(", ");
+        this.editing.prerequisites = false;
+      }
+    },
+
+    startModuleRename(mod) {
+      this.editingModuleId = mod.id;
+      this.moduleNameDraft = mod.name;
+    },
+
+    cancelModuleRename() {
+      this.editingModuleId = null;
+      this.moduleNameDraft = "";
+    },
+
+    async saveModuleName(mod) {
+      const name = this.moduleNameDraft.trim();
+      if (this.editingModuleId !== mod.id) return;
+      if (!name || name === mod.name) {
+        this.cancelModuleRename();
+        return;
+      }
+      const ok = await Alpine.store("app").mutate(`/api/modules/${mod.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      });
+      if (ok) {
+        this.cancelModuleRename();
+      }
+    },
+
+    async toggleModule(mod, event) {
+      if (this.isModuleCompletionSaving(mod.id)) {
+        event.target.checked = !!this._moduleCompletionPending[mod.id];
+        return;
+      }
+      const checked = !!event.target.checked;
+      this._moduleCompletionPending[mod.id] = checked;
+      event.target.disabled = true;
+      try {
+        const ok = await Alpine.store("app").mutate(`/api/modules/${mod.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ completed: checked }),
+        });
+        if (!ok) {
+          event.target.checked = !!mod.completed_at;
+        }
+      } finally {
+        delete this._moduleCompletionPending[mod.id];
+        if (event.target.isConnected) {
+          event.target.disabled = false;
+        }
+      }
+    },
+
+    async deleteModule(mod) {
+      const confirmed = await requestConfirm(
+        `Delete module "${mod.name}"?`
+      );
+      if (!confirmed) return;
+      const ok = await Alpine.store("app").mutate(`/api/modules/${mod.id}`, {
+        method: "DELETE",
+      });
+      if (ok) {
+        showToast("Module deleted", "info");
+      }
+    },
+
+    async deleteCourse() {
+      const course = this.course;
+      if (!course) return;
+      const confirmed = await requestConfirm(
+        `Delete course "${course.name}" and all its modules?`
+      );
+      if (!confirmed) return;
+      const ok = await Alpine.store("app").mutate(`/api/courses/${course.id}`, {
+        method: "DELETE",
+      });
+      if (ok) {
+        showToast("Course deleted", "info");
+      }
+    },
+
+    async addModule() {
+      const name = this.newModuleName.trim();
+      if (!name) return;
+      const course = this.course;
+      if (!course) return;
+      const ok = await Alpine.store("app").mutate(`/api/courses/${course.id}/modules`, {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+      if (ok) {
+        this.newModuleName = "";
+        showToast("Module added", "success");
+      }
+    },
+  }));
 });
-
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-action]");
-  if (!button) return;
-  const action = button.dataset.action;
-
-  if (action === "prev-period") {
-    state.anchor = shiftAnchor(state.anchor || todayIso(), state.view, -1);
-    await refresh();
-  }
-  if (action === "next-period") {
-    state.anchor = shiftAnchor(state.anchor || todayIso(), state.view, 1);
-    await refresh();
-  }
-  if (action === "go-today") {
-    state.anchor = todayIso();
-    await refresh();
-  }
-  if (action === "toggle-view") {
-    state.view = state.view === "week" ? "month" : "week";
-    await refresh();
-  }
-  if (action === "delete-course") {
-    await mutate(`/api/courses/${button.dataset.courseId}`, { method: "DELETE" });
-  }
-  if (action === "delete-vendor") {
-    await mutate(`/api/vendors/${button.dataset.vendorId}`, { method: "DELETE" });
-  }
-  if (action === "toggle-complete") {
-    await mutate(`/api/modules/${button.dataset.moduleId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ completed: button.dataset.completed === "true" }),
-    });
-  }
-  if (action === "delete-module") {
-    await mutate(`/api/modules/${button.dataset.moduleId}`, { method: "DELETE" });
-  }
-});
-
-document.addEventListener("change", async (event) => {
-  const element = event.target;
-  if (element.id === "include-weekends" || element.id === "deadline-slack-days") {
-    const includeWeekends = document.getElementById("include-weekends");
-    const deadlineSlackDays = document.getElementById("deadline-slack-days");
-    await mutate("/api/settings", {
-      method: "PATCH",
-      body: JSON.stringify({
-        include_weekends: includeWeekends.checked,
-        deadline_slack_days: Math.max(0, Number(deadlineSlackDays.value) || 0),
-      }),
-    });
-  }
-});
-
-refresh();
