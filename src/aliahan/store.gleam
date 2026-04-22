@@ -2,39 +2,17 @@ import aliahan/config
 import aliahan/date
 import aliahan/env
 import aliahan/model.{
-  type AppError,
-  type BootstrapData,
-  BootstrapData,
-  type Conflict,
-  type Course,
-  Course,
-  type CourseModulesInput,
-  ExplicitModules,
-  GeneratedRange,
-  type Module,
-  Module,
-  type ModuleRange,
-  ModuleRange,
-  type NewCourseInput,
-  ScheduleDay,
-  type ScheduleEntry,
-  type ScheduleView,
-  ScheduleView,
-  type SettingsPatch,
-  type Settings,
-  Settings,
-  type UpdateCourseInput,
-  type Vendor,
-  Vendor,
-  Database,
-  IOError,
-  NotFound,
-  Validation,
+  type AppError, type BootstrapData, type Conflict, type Course,
+  type CourseModulesInput, type Module, type ModuleRange, type NewCourseInput,
+  type ScheduleEntry, type ScheduleView, type Settings, type SettingsPatch,
+  type UpdateCourseInput, type Vendor, BootstrapData, Course, Database,
+  ExplicitModules, GeneratedRange, IOError, Module, ModuleRange, NotFound,
+  ScheduleDay, ScheduleEntry, ScheduleView, Settings, Validation, Vendor,
 }
 import aliahan/scheduler
 import filepath
 import gleam/dict
-import gleam/dynamic/decode as decode
+import gleam/dynamic/decode
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -46,9 +24,18 @@ import simplifile
 import sqlight
 
 pub const database_path_env_var = "ALIAHAN_DATABASE_PATH"
+
 pub const courses_toml_path_env_var = "ALIAHAN_COURSES_TOML_PATH"
+
 const default_database_path = "aliahan.sqlite3"
+
 const default_courses_toml_path = "courses.toml"
+
+type ScheduleMutation {
+  KeepStoredSchedule
+  RebuildStoredSchedule
+  RemoveStoredModuleFromSchedule(module_id: Int)
+}
 
 pub fn database_path() -> String {
   path_from_env(database_path_env_var, default_database_path)
@@ -70,24 +57,24 @@ pub fn courses_toml_path() -> String {
 }
 
 pub fn initialise() -> Result(Nil, AppError) {
-  use _ <- result.try(with_db(fn(connection) {
-    use _ <- result.try(prepare_schema(connection))
+  use _ <- result.try(
+    with_db(fn(connection) {
+      use _ <- result.try(prepare_schema(connection))
 
-    let is_empty = has_courses(connection) |> result.unwrap(False) |> bool_not
+      let is_empty = has_courses(connection) |> result.unwrap(False) |> bool_not
 
-    use _ <- result.try(
-      case is_empty {
+      use _ <- result.try(case is_empty {
         True ->
           case simplifile.is_file(courses_toml_path()) {
             Ok(True) -> transactional(connection, import_from_toml)
             _ -> transactional(connection, refresh_schedule_in_transaction)
           }
         False -> transactional(connection, refresh_schedule_in_transaction)
-      },
-    )
+      })
 
-    Ok(Nil)
-  }))
+      Ok(Nil)
+    }),
+  )
 
   let _ = export_snapshot()
   Ok(Nil)
@@ -99,22 +86,21 @@ pub fn bootstrap(
 ) -> Result(BootstrapData, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(prepare_schema(connection))
-    use #(conflicts, schedule_entries) <- result.try(
-      transactional(connection, refresh_schedule_in_transaction),
-    )
+    use #(conflicts, schedule_entries) <- result.try(transactional(
+      connection,
+      ensure_schedule_in_transaction,
+    ))
     use settings <- result.try(load_settings(connection))
     use vendors <- result.try(load_vendors(connection))
     let today = date.today()
     let schedule = build_schedule_view(schedule_entries, view, anchor)
-    Ok(
-      BootstrapData(
-        today: today,
-        settings: settings,
-        vendors: vendors,
-        conflicts: conflicts,
-        schedule: schedule,
-      ),
-    )
+    Ok(BootstrapData(
+      today: today,
+      settings: settings,
+      vendors: vendors,
+      conflicts: conflicts,
+      schedule: schedule,
+    ))
   })
 }
 
@@ -124,9 +110,10 @@ pub fn schedule_view(
 ) -> Result(ScheduleView, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(prepare_schema(connection))
-    use #(_, schedule_entries) <- result.try(
-      transactional(connection, refresh_schedule_in_transaction),
-    )
+    use #(_, schedule_entries) <- result.try(transactional(
+      connection,
+      ensure_schedule_in_transaction,
+    ))
     Ok(build_schedule_view(schedule_entries, view, anchor))
   })
 }
@@ -137,19 +124,21 @@ pub fn set_settings(patch: SettingsPatch) -> Result(Nil, AppError) {
     let settings = merge_settings(current, patch)
     case settings.deadline_slack_days < 0 {
       True -> Error(Validation("Deadline slack days cannot be negative"))
-      False ->
-        exec_with_args(
+      False -> {
+        use _ <- result.try(exec_with_args(
           "
-          update app_settings
-          set include_weekends = ?, deadline_slack_days = ?
-          where id = 1
-          ",
+            update app_settings
+            set include_weekends = ?, deadline_slack_days = ?
+            where id = 1
+            ",
           [
             sqlight.bool(settings.include_weekends),
             sqlight.int(settings.deadline_slack_days),
           ],
           connection,
-        )
+        ))
+        Ok(RebuildStoredSchedule)
+      }
     }
   })
 }
@@ -158,11 +147,12 @@ pub fn create_vendor(name: String) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
     let name = validate_name(name, "Vendor name") |> result.unwrap("")
     use _ <- result.try(validate_name(name, "Vendor name"))
-    exec_with_args(
+    use _ <- result.try(exec_with_args(
       "insert into vendors (name) values (?)",
       [sqlight.text(name)],
       connection,
-    )
+    ))
+    Ok(KeepStoredSchedule)
   })
 }
 
@@ -178,11 +168,12 @@ pub fn delete_vendor(vendor_id: Int) -> Result(Nil, AppError) {
       [sqlight.int(vendor_id)],
       connection,
     ))
-    exec_with_args(
+    use _ <- result.try(exec_with_args(
       "delete from vendors where id = ?",
       [sqlight.int(vendor_id)],
       connection,
-    )
+    ))
+    Ok(RebuildStoredSchedule)
   })
 }
 
@@ -195,18 +186,32 @@ pub fn create_course(input: NewCourseInput) -> Result(Nil, AppError) {
     let generated_modules = expand_modules(input.modules)
     use _ <- result.try(validate_modules(generated_modules))
 
-    use course_id <- result.try(
-      insert_course_row(connection, input.vendor_id, name, deadline, module_range),
-    )
-    use prerequisite_ids <- result.try(
-      resolve_prerequisites(connection, input.vendor_id, input.prerequisites),
-    )
-    use _ <- result.try(insert_prerequisites(connection, course_id, prerequisite_ids))
-    insert_modules(connection, course_id, generated_modules)
+    use course_id <- result.try(insert_course_row(
+      connection,
+      input.vendor_id,
+      name,
+      deadline,
+      module_range,
+    ))
+    use prerequisite_ids <- result.try(resolve_prerequisites(
+      connection,
+      input.vendor_id,
+      input.prerequisites,
+    ))
+    use _ <- result.try(insert_prerequisites(
+      connection,
+      course_id,
+      prerequisite_ids,
+    ))
+    use _ <- result.try(insert_modules(connection, course_id, generated_modules))
+    Ok(RebuildStoredSchedule)
   })
 }
 
-pub fn update_course(course_id: Int, input: UpdateCourseInput) -> Result(Nil, AppError) {
+pub fn update_course(
+  course_id: Int,
+  input: UpdateCourseInput,
+) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
     use #(vendor_id, current_name, current_deadline, current_prerequisites) <- result.try(
       load_course_update_state(connection, course_id),
@@ -225,38 +230,46 @@ pub fn update_course(course_id: Int, input: UpdateCourseInput) -> Result(Nil, Ap
     }
     use name <- result.try(validate_name(next_name, "Course name"))
     let deadline = date.to_iso(next_deadline)
-    use prerequisite_ids <- result.try(
-      resolve_prerequisites(connection, vendor_id, next_prerequisites),
-    )
-    use _ <- result.try(
-      exec_with_args(
-        "
+    use prerequisite_ids <- result.try(resolve_prerequisites(
+      connection,
+      vendor_id,
+      next_prerequisites,
+    ))
+    use _ <- result.try(exec_with_args(
+      "
         update courses
         set name = ?, deadline_date = ?
         where id = ?
         ",
-        [sqlight.text(name), sqlight.text(deadline), sqlight.int(course_id)],
-        connection,
-      ),
-    )
-    use _ <- result.try(
-      exec_with_args(
-        "delete from course_prerequisites where course_id = ?",
-        [sqlight.int(course_id)],
-        connection,
-      ),
-    )
-    insert_prerequisites(connection, course_id, prerequisite_ids)
+      [sqlight.text(name), sqlight.text(deadline), sqlight.int(course_id)],
+      connection,
+    ))
+    use _ <- result.try(exec_with_args(
+      "delete from course_prerequisites where course_id = ?",
+      [sqlight.int(course_id)],
+      connection,
+    ))
+    use _ <- result.try(insert_prerequisites(
+      connection,
+      course_id,
+      prerequisite_ids,
+    ))
+    let schedule_mutation = case input.deadline, input.prerequisites {
+      None, None -> KeepStoredSchedule
+      _, _ -> RebuildStoredSchedule
+    }
+    Ok(schedule_mutation)
   })
 }
 
 pub fn delete_course(course_id: Int) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
-    exec_with_args(
+    use _ <- result.try(exec_with_args(
       "delete from courses where id = ?",
       [sqlight.int(course_id)],
       connection,
-    )
+    ))
+    Ok(RebuildStoredSchedule)
   })
 }
 
@@ -272,21 +285,20 @@ pub fn add_module(course_id: Int, name: String) -> Result(Nil, AppError) {
       )
       |> result.unwrap(1)
 
-    use _ <- result.try(
-      exec_with_args(
-        "
+    use _ <- result.try(exec_with_args(
+      "
         insert into modules (course_id, position, name, completed_at)
         values (?, ?, ?, null)
         ",
-        [
-          sqlight.int(course_id),
-          sqlight.int(next_position),
-          sqlight.text(name),
-        ],
-        connection,
-      ),
-    )
-    clear_course_range(connection, course_id)
+      [
+        sqlight.int(course_id),
+        sqlight.int(next_position),
+        sqlight.text(name),
+      ],
+      connection,
+    ))
+    use _ <- result.try(clear_course_range(connection, course_id))
+    Ok(RebuildStoredSchedule)
   })
 }
 
@@ -298,7 +310,10 @@ pub fn set_module_completed(module_id: Int, done: Bool) -> Result(Nil, AppError)
   update_module(module_id, None, Some(done), None)
 }
 
-pub fn set_module_position(module_id: Int, position: Int) -> Result(Nil, AppError) {
+pub fn set_module_position(
+  module_id: Int,
+  position: Int,
+) -> Result(Nil, AppError) {
   update_module(module_id, None, None, Some(position))
 }
 
@@ -309,59 +324,83 @@ pub fn update_module(
   position: Option(Int),
 ) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
-    use course_id <- result.try(module_course_id(connection, module_id))
+    let today_iso = date.to_iso(date.today())
+    use #(course_id, current_completed_at, current_scheduled_date) <- result.try(
+      load_module_update_state(connection, module_id),
+    )
+    use schedule_is_current <- result.try(schedule_generated_for_date(
+      connection,
+      today_iso,
+    ))
     use validated_name <- result.try(validate_optional_name(name, "Module name"))
-    use order_changed <- result.try(
-      case position {
-        Some(next_position) -> {
-          use ordered_module_ids <- result.try(
-            moved_module_ids(connection, course_id, module_id, next_position),
-          )
-          apply_module_order(connection, course_id, ordered_module_ids)
-        }
-        None -> Ok(False)
-      },
-    )
-    use _ <- result.try(
-      case validated_name {
-        Some(name) ->
-          exec_with_args(
-            "update modules set name = ? where id = ?",
-            [sqlight.text(name), sqlight.int(module_id)],
-            connection,
-          )
-        None -> Ok(Nil)
-      },
-    )
-    use _ <- result.try(
-      case completed {
-        Some(done) ->
-          exec_with_args(
-            "update modules set completed_at = ? where id = ?",
-            [
-              sqlight.nullable(sqlight.text, completed_at_value(done)),
-              sqlight.int(module_id),
-            ],
-            connection,
-          )
-        None -> Ok(Nil)
-      },
-    )
-    case validated_name, order_changed {
+    use order_changed <- result.try(case position {
+      Some(next_position) -> {
+        use ordered_module_ids <- result.try(moved_module_ids(
+          connection,
+          course_id,
+          module_id,
+          next_position,
+        ))
+        apply_module_order(connection, course_id, ordered_module_ids)
+      }
+      None -> Ok(False)
+    })
+    use _ <- result.try(case validated_name {
+      Some(name) ->
+        exec_with_args(
+          "update modules set name = ? where id = ?",
+          [sqlight.text(name), sqlight.int(module_id)],
+          connection,
+        )
+      None -> Ok(Nil)
+    })
+    use _ <- result.try(case completed {
+      Some(done) ->
+        exec_with_args(
+          "update modules set completed_at = ? where id = ?",
+          [
+            sqlight.nullable(sqlight.text, completed_at_value(done)),
+            sqlight.int(module_id),
+          ],
+          connection,
+        )
+      None -> Ok(Nil)
+    })
+    use _ <- result.try(case validated_name, order_changed {
       Some(_), _ -> clear_course_range(connection, course_id)
       None, True -> clear_course_range(connection, course_id)
       None, False -> Ok(Nil)
-    }
+    })
+    Ok(schedule_mutation_for_module_update(
+      module_id,
+      validated_name,
+      completed,
+      order_changed,
+      schedule_is_current,
+      current_completed_at,
+      current_scheduled_date,
+      today_iso,
+    ))
   })
 }
 
-pub fn reorder_modules(course_id: Int, module_ids: List(Int)) -> Result(Nil, AppError) {
+pub fn reorder_modules(
+  course_id: Int,
+  module_ids: List(Int),
+) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
     use _ <- result.try(course_vendor_id(connection, course_id))
-    use changed <- result.try(apply_module_order(connection, course_id, module_ids))
+    use changed <- result.try(apply_module_order(
+      connection,
+      course_id,
+      module_ids,
+    ))
     case changed {
-      True -> clear_course_range(connection, course_id)
-      False -> Ok(Nil)
+      True -> {
+        use _ <- result.try(clear_course_range(connection, course_id))
+        Ok(RebuildStoredSchedule)
+      }
+      False -> Ok(KeepStoredSchedule)
     }
   })
 }
@@ -369,37 +408,40 @@ pub fn reorder_modules(course_id: Int, module_ids: List(Int)) -> Result(Nil, App
 pub fn delete_module(module_id: Int) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
     use course_id <- result.try(module_course_id(connection, module_id))
-    use _ <- result.try(
-      exec_with_args(
-        "delete from modules where id = ?",
-        [sqlight.int(module_id)],
-        connection,
-      ),
-    )
+    use _ <- result.try(exec_with_args(
+      "delete from modules where id = ?",
+      [sqlight.int(module_id)],
+      connection,
+    ))
     use _ <- result.try(resequence_modules(connection, course_id))
-    clear_course_range(connection, course_id)
+    use _ <- result.try(clear_course_range(connection, course_id))
+    Ok(RebuildStoredSchedule)
   })
 }
 
 fn apply_mutation(
-  mutation: fn(sqlight.Connection) -> Result(Nil, AppError),
+  mutation: fn(sqlight.Connection) -> Result(ScheduleMutation, AppError),
 ) -> Result(Nil, AppError) {
-  use _ <- result.try(with_db(fn(connection) {
-    use _ <- result.try(prepare_schema(connection))
-    use _ <- result.try(
-      transactional(connection, fn(tx) {
-        use _ <- result.try(mutation(tx))
-        use _ <- result.try(refresh_schedule_in_transaction(tx))
-        Ok(Nil)
-      }),
-    )
-    Ok(Nil)
-  }))
+  use _ <- result.try(
+    with_db(fn(connection) {
+      use _ <- result.try(prepare_schema(connection))
+      use _ <- result.try(
+        transactional(connection, fn(tx) {
+          use schedule_mutation <- result.try(mutation(tx))
+          use _ <- result.try(apply_schedule_mutation(tx, schedule_mutation))
+          Ok(Nil)
+        }),
+      )
+      Ok(Nil)
+    }),
+  )
   let _ = export_snapshot()
   Ok(Nil)
 }
 
-fn with_db(action: fn(sqlight.Connection) -> Result(a, AppError)) -> Result(a, AppError) {
+fn with_db(
+  action: fn(sqlight.Connection) -> Result(a, AppError),
+) -> Result(a, AppError) {
   use connection <- result.try(
     sqlight.open(database_path())
     |> result.map_error(sql_error),
@@ -422,12 +464,17 @@ fn with_db(action: fn(sqlight.Connection) -> Result(a, AppError)) -> Result(a, A
 fn prepare_schema(connection: sqlight.Connection) -> Result(Nil, AppError) {
   use _ <- result.try(exec(connection, "pragma foreign_keys = on"))
   use _ <- result.try(exec(connection, schema_sql))
-  use _ <- result.try(ensure_app_settings_column(connection))
+  use _ <- result.try(ensure_app_settings_columns(connection))
   exec(
     connection,
     "
-    insert or ignore into app_settings (id, include_weekends, deadline_slack_days)
-    values (1, 0, 0)
+    insert or ignore into app_settings (
+      id,
+      include_weekends,
+      deadline_slack_days,
+      schedule_generated_for
+    )
+    values (1, 0, 0, null)
     ",
   )
 }
@@ -453,7 +500,9 @@ fn transactional(
   }
 }
 
-fn import_from_toml(connection: sqlight.Connection) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
+fn import_from_toml(
+  connection: sqlight.Connection,
+) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
   use contents <- result.try(
     simplifile.read(courses_toml_path())
     |> result.map_error(file_error),
@@ -472,15 +521,13 @@ fn import_from_toml(connection: sqlight.Connection) -> Result(#(List(Conflict), 
       let module_range = module_range_from_input(imported_course.modules)
       let modules = expand_modules(imported_course.modules)
       use _ <- result.try(validate_modules(modules))
-      use course_id <- result.try(
-        insert_course_row(
-          connection,
-          vendor_id,
-          imported_course.course_name |> string.trim,
-          date.to_iso(imported_course.deadline),
-          module_range,
-        ),
-      )
+      use course_id <- result.try(insert_course_row(
+        connection,
+        vendor_id,
+        imported_course.course_name |> string.trim,
+        date.to_iso(imported_course.deadline),
+        module_range,
+      ))
       use _ <- result.try(insert_modules(connection, course_id, modules))
       Ok(dict.insert(vendor_ids, vendor_name, vendor_id))
     }),
@@ -489,13 +536,20 @@ fn import_from_toml(connection: sqlight.Connection) -> Result(#(List(Conflict), 
   use courses <- result.try(load_courses(connection))
   use _ <- result.try(
     list.try_fold(imported, Nil, fn(_, imported_course) {
-      use vendor_id <- result.try(find_vendor_id(connection, imported_course.vendor_name))
-      use course_id <- result.try(
-        find_course_id(connection, vendor_id, imported_course.course_name),
-      )
-      use prerequisite_ids <- result.try(
-        resolve_prerequisites(connection, vendor_id, imported_course.prerequisites),
-      )
+      use vendor_id <- result.try(find_vendor_id(
+        connection,
+        imported_course.vendor_name,
+      ))
+      use course_id <- result.try(find_course_id(
+        connection,
+        vendor_id,
+        imported_course.course_name,
+      ))
+      use prerequisite_ids <- result.try(resolve_prerequisites(
+        connection,
+        vendor_id,
+        imported_course.prerequisites,
+      ))
       insert_prerequisites(connection, course_id, prerequisite_ids)
     }),
   )
@@ -507,11 +561,55 @@ fn import_from_toml(connection: sqlight.Connection) -> Result(#(List(Conflict), 
 fn refresh_schedule_in_transaction(
   connection: sqlight.Connection,
 ) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
+  let today = date.today()
+  let today_iso = date.to_iso(today)
+  use #(stored_entries, conflicts, schedule_entries) <- result.try(
+    compute_schedule(connection, today),
+  )
+  use _ <- result.try(persist_schedule_entries(
+    connection,
+    stored_entries,
+    Some(today_iso),
+  ))
+  Ok(#(conflicts, schedule_entries))
+}
+
+fn ensure_schedule_in_transaction(
+  connection: sqlight.Connection,
+) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
+  let today = date.today()
+  let today_iso = date.to_iso(today)
+  use schedule_is_current <- result.try(schedule_generated_for_date(
+    connection,
+    today_iso,
+  ))
+  case schedule_is_current {
+    True -> {
+      use #(_, conflicts, _) <- result.try(compute_schedule(connection, today))
+      use schedule_entries <- result.try(load_schedule_entries(connection))
+      Ok(#(conflicts, schedule_entries))
+    }
+    False -> refresh_schedule_in_transaction(connection)
+  }
+}
+
+fn compute_schedule(
+  connection: sqlight.Connection,
+  today: calendar.Date,
+) -> Result(
+  #(List(scheduler.StoredEntry), List(Conflict), List(ScheduleEntry)),
+  AppError,
+) {
   use settings <- result.try(load_settings(connection))
   use courses <- result.try(load_courses(connection))
-  use #(stored_entries, conflicts, schedule_entries) <- result.try(
-    scheduler.rebuild(courses, settings, date.today()),
-  )
+  scheduler.rebuild(courses, settings, today)
+}
+
+fn persist_schedule_entries(
+  connection: sqlight.Connection,
+  stored_entries: List(scheduler.StoredEntry),
+  generated_for: Option(String),
+) -> Result(Nil, AppError) {
   use _ <- result.try(exec(connection, "delete from schedule_entries"))
   use _ <- result.try(
     list.try_fold(stored_entries, Nil, fn(_, entry) {
@@ -529,7 +627,22 @@ fn refresh_schedule_in_transaction(
       )
     }),
   )
-  Ok(#(conflicts, schedule_entries))
+  use _ <- result.try(set_schedule_generated_for(connection, generated_for))
+  Ok(Nil)
+}
+
+fn apply_schedule_mutation(
+  connection: sqlight.Connection,
+  schedule_mutation: ScheduleMutation,
+) -> Result(Nil, AppError) {
+  case schedule_mutation {
+    KeepStoredSchedule -> Ok(Nil)
+    RebuildStoredSchedule ->
+      refresh_schedule_in_transaction(connection)
+      |> result.map(fn(_) { Nil })
+    RemoveStoredModuleFromSchedule(module_id) ->
+      delete_schedule_entry(connection, module_id)
+  }
 }
 
 fn export_snapshot() -> Result(Nil, AppError) {
@@ -558,6 +671,40 @@ fn load_settings(connection: sqlight.Connection) -> Result(Settings, AppError) {
   })
 }
 
+fn schedule_generated_for_date(
+  connection: sqlight.Connection,
+  expected_date: String,
+) -> Result(Bool, AppError) {
+  load_schedule_generated_for(connection)
+  |> result.map(fn(generated_for) { generated_for == Some(expected_date) })
+}
+
+fn load_schedule_generated_for(
+  connection: sqlight.Connection,
+) -> Result(Option(String), AppError) {
+  query_one(
+    "select schedule_generated_for from app_settings where id = 1",
+    [],
+    optional_string_decoder(),
+    connection,
+  )
+}
+
+fn set_schedule_generated_for(
+  connection: sqlight.Connection,
+  generated_for: Option(String),
+) -> Result(Nil, AppError) {
+  exec_with_args(
+    "
+    update app_settings
+    set schedule_generated_for = ?
+    where id = 1
+    ",
+    [sqlight.nullable(sqlight.text, generated_for)],
+    connection,
+  )
+}
+
 fn merge_settings(current: Settings, patch: SettingsPatch) -> Settings {
   let include_weekends = case patch.include_weekends {
     Some(include_weekends) -> include_weekends
@@ -574,16 +721,17 @@ fn load_course_update_state(
   connection: sqlight.Connection,
   course_id: Int,
 ) -> Result(#(Int, String, calendar.Date, List(String)), AppError) {
-  use #(vendor_id, name, deadline_text) <- result.try(
-    query_one(
-      "select vendor_id, name, deadline_date from courses where id = ?",
-      [sqlight.int(course_id)],
-      course_update_row_decoder(),
-      connection,
-    ),
-  )
+  use #(vendor_id, name, deadline_text) <- result.try(query_one(
+    "select vendor_id, name, deadline_date from courses where id = ?",
+    [sqlight.int(course_id)],
+    course_update_row_decoder(),
+    connection,
+  ))
   use deadline <- result.try(date.parse_iso(deadline_text))
-  use prerequisites <- result.try(load_course_prerequisite_names(connection, course_id))
+  use prerequisites <- result.try(load_course_prerequisite_names(
+    connection,
+    course_id,
+  ))
   Ok(#(vendor_id, name, deadline, prerequisites))
 }
 
@@ -605,18 +753,34 @@ fn load_course_prerequisite_names(
   )
 }
 
-fn load_vendors(connection: sqlight.Connection) -> Result(List(Vendor), AppError) {
-  use vendor_rows <- result.try(
-    query(
-      "select id, name from vendors order by name",
-      [],
-      pair_int_string_decoder(),
-      connection,
-    ),
+fn load_module_update_state(
+  connection: sqlight.Connection,
+  module_id: Int,
+) -> Result(#(Int, Option(String), Option(String)), AppError) {
+  query_one(
+    "
+    select m.course_id, m.completed_at, se.scheduled_date
+    from modules m
+    left join schedule_entries se on se.module_id = m.id
+    where m.id = ?
+    ",
+    [sqlight.int(module_id)],
+    module_update_state_row_decoder(),
+    connection,
   )
-  use course_rows <- result.try(
-    query(
-      "
+}
+
+fn load_vendors(
+  connection: sqlight.Connection,
+) -> Result(List(Vendor), AppError) {
+  use vendor_rows <- result.try(query(
+    "select id, name from vendors order by name",
+    [],
+    pair_int_string_decoder(),
+    connection,
+  ))
+  use course_rows <- result.try(query(
+    "
       select
         c.id,
         c.vendor_id,
@@ -630,27 +794,23 @@ fn load_vendors(connection: sqlight.Connection) -> Result(List(Vendor), AppError
       join vendors v on v.id = c.vendor_id
       order by v.name, c.name
       ",
-      [],
-      course_row_decoder(),
-      connection,
-    ),
-  )
-  use prerequisite_rows <- result.try(
-    query(
-      "
+    [],
+    course_row_decoder(),
+    connection,
+  ))
+  use prerequisite_rows <- result.try(query(
+    "
       select cp.course_id, cp.prerequisite_course_id, prereq.name
       from course_prerequisites cp
       join courses prereq on prereq.id = cp.prerequisite_course_id
       order by cp.course_id, prereq.name
       ",
-      [],
-      prerequisite_row_decoder(),
-      connection,
-    ),
-  )
-  use module_rows <- result.try(
-    query(
-      "
+    [],
+    prerequisite_row_decoder(),
+    connection,
+  ))
+  use module_rows <- result.try(query(
+    "
       select
         m.id,
         m.course_id,
@@ -663,11 +823,10 @@ fn load_vendors(connection: sqlight.Connection) -> Result(List(Vendor), AppError
       left join schedule_entries se on se.module_id = m.id
       order by m.course_id, m.position
       ",
-      [],
-      module_row_decoder(),
-      connection,
-    ),
-  )
+    [],
+    module_row_decoder(),
+    connection,
+  ))
 
   let prerequisite_ids =
     prerequisite_rows
@@ -696,7 +855,10 @@ fn load_vendors(connection: sqlight.Connection) -> Result(List(Vendor), AppError
       |> list.try_map(fn(course_row) {
         use deadline <- result.try(date.parse_iso(course_row.4))
         let prerequisite_id_list =
-          prerequisite_ids |> dict.get(course_row.0) |> result.unwrap([]) |> list.reverse
+          prerequisite_ids
+          |> dict.get(course_row.0)
+          |> result.unwrap([])
+          |> list.reverse
         let prerequisite_name_list =
           prerequisite_names
           |> dict.get(course_row.0)
@@ -704,34 +866,69 @@ fn load_vendors(connection: sqlight.Connection) -> Result(List(Vendor), AppError
           |> list.reverse
         let course_modules =
           modules |> dict.get(course_row.0) |> result.unwrap([]) |> list.reverse
-        Ok(
-          Course(
-            id: course_row.0,
-            vendor_id: course_row.1,
-            vendor_name: course_row.2,
-            name: course_row.3,
-            deadline: deadline,
-            prerequisites: prerequisite_name_list,
-            prerequisite_ids: prerequisite_id_list,
-            module_range: module_range_from_row(course_row),
-            modules: course_modules,
-          ),
-        )
+        Ok(Course(
+          id: course_row.0,
+          vendor_id: course_row.1,
+          vendor_name: course_row.2,
+          name: course_row.3,
+          deadline: deadline,
+          prerequisites: prerequisite_name_list,
+          prerequisite_ids: prerequisite_id_list,
+          module_range: module_range_from_row(course_row),
+          modules: course_modules,
+        ))
       })
 
     result.map(courses, fn(courses) { Vendor(id: row.0, name: row.1, courses:) })
   })
 }
 
-fn load_courses(connection: sqlight.Connection) -> Result(List(Course), AppError) {
+fn load_courses(
+  connection: sqlight.Connection,
+) -> Result(List(Course), AppError) {
   use vendors <- result.try(load_vendors(connection))
   Ok(
     vendors
-    |> list.fold([], fn(acc, vendor) {
-      list.append(vendor.courses, acc)
-    })
-    |> list.reverse
+    |> list.fold([], fn(acc, vendor) { list.append(vendor.courses, acc) })
+    |> list.reverse,
   )
+}
+
+fn load_schedule_entries(
+  connection: sqlight.Connection,
+) -> Result(List(ScheduleEntry), AppError) {
+  use rows <- result.try(query(
+    "
+      select
+        se.module_id,
+        v.name,
+        c.name,
+        m.name,
+        se.scheduled_date,
+        se.slot_index
+      from schedule_entries se
+      join modules m on m.id = se.module_id
+      join courses c on c.id = m.course_id
+      join vendors v on v.id = c.vendor_id
+      where m.completed_at is null
+      order by se.scheduled_date, se.slot_index, se.module_id
+      ",
+    [],
+    schedule_entry_row_decoder(),
+    connection,
+  ))
+  rows
+  |> list.try_map(fn(row) {
+    use scheduled_date <- result.try(date.parse_iso(row.4))
+    Ok(ScheduleEntry(
+      module_id: row.0,
+      vendor_name: row.1,
+      course_name: row.2,
+      module_name: row.3,
+      scheduled_date: scheduled_date,
+      slot_index: row.5,
+    ))
+  })
 }
 
 fn build_schedule_view(
@@ -753,15 +950,22 @@ fn build_schedule_view(
     |> list.map(fn(day) {
       let day_entries =
         entries
-        |> list.filter(fn(entry) { date.compare(entry.scheduled_date, day) == Eq })
-        |> list.sort(fn(left, right) { int.compare(left.slot_index, right.slot_index) })
+        |> list.filter(fn(entry) {
+          date.compare(entry.scheduled_date, day) == Eq
+        })
+        |> list.sort(fn(left, right) {
+          int.compare(left.slot_index, right.slot_index)
+        })
       ScheduleDay(date: day, entries: day_entries)
     })
 
   ScheduleView(view:, anchor:, period_start:, period_end:, days:)
 }
 
-fn days_in_period(start: calendar.Date, finish: calendar.Date) -> List(calendar.Date) {
+fn days_in_period(
+  start: calendar.Date,
+  finish: calendar.Date,
+) -> List(calendar.Date) {
   case date.compare(start, finish) {
     Gt -> []
     _ -> [start, ..days_in_period(date.day_after(start), finish)]
@@ -775,9 +979,8 @@ fn insert_course_row(
   deadline: String,
   module_range: Option(ModuleRange),
 ) -> Result(Int, AppError) {
-  use _ <- result.try(
-    exec_with_args(
-      "
+  use _ <- result.try(exec_with_args(
+    "
       insert into courses (
         vendor_id,
         name,
@@ -787,37 +990,49 @@ fn insert_course_row(
         module_range_end
       ) values (?, ?, ?, ?, ?, ?)
       ",
-      [
-        sqlight.int(vendor_id),
-        sqlight.text(name),
-        sqlight.text(deadline),
-        sqlight.nullable(sqlight.text, option_map(module_range, fn(range) { range.prefix })),
-        sqlight.nullable(sqlight.int, option_map(module_range, fn(range) { range.start })),
-        sqlight.nullable(sqlight.int, option_map(module_range, fn(range) { range.end })),
-      ],
-      connection,
-    ),
-  )
+    [
+      sqlight.int(vendor_id),
+      sqlight.text(name),
+      sqlight.text(deadline),
+      sqlight.nullable(
+        sqlight.text,
+        option_map(module_range, fn(range) { range.prefix }),
+      ),
+      sqlight.nullable(
+        sqlight.int,
+        option_map(module_range, fn(range) { range.start }),
+      ),
+      sqlight.nullable(
+        sqlight.int,
+        option_map(module_range, fn(range) { range.end }),
+      ),
+    ],
+    connection,
+  ))
   query_one("select last_insert_rowid()", [], int_decoder(), connection)
 }
 
-fn ensure_vendor_id(connection: sqlight.Connection, name: String) -> Result(Int, AppError) {
+fn ensure_vendor_id(
+  connection: sqlight.Connection,
+  name: String,
+) -> Result(Int, AppError) {
   case find_vendor_id(connection, name) {
     Ok(vendor_id) -> Ok(vendor_id)
     Error(_) -> {
-      use _ <- result.try(
-        exec_with_args(
-          "insert into vendors (name) values (?)",
-          [sqlight.text(name)],
-          connection,
-        ),
-      )
+      use _ <- result.try(exec_with_args(
+        "insert into vendors (name) values (?)",
+        [sqlight.text(name)],
+        connection,
+      ))
       query_one("select last_insert_rowid()", [], int_decoder(), connection)
     }
   }
 }
 
-fn find_vendor_id(connection: sqlight.Connection, name: String) -> Result(Int, AppError) {
+fn find_vendor_id(
+  connection: sqlight.Connection,
+  name: String,
+) -> Result(Int, AppError) {
   query_one(
     "select id from vendors where name = ?",
     [sqlight.text(name)],
@@ -843,12 +1058,14 @@ fn ensure_vendor_exists(
   connection: sqlight.Connection,
   vendor_id: Int,
 ) -> Result(Nil, AppError) {
-  case query_one(
-    "select count(*) from vendors where id = ?",
-    [sqlight.int(vendor_id)],
-    int_decoder(),
-    connection,
-  ) {
+  case
+    query_one(
+      "select count(*) from vendors where id = ?",
+      [sqlight.int(vendor_id)],
+      int_decoder(),
+      connection,
+    )
+  {
     Ok(1) -> Ok(Nil)
     Ok(_) -> Error(NotFound("Vendor not found"))
     Error(error) -> Error(error)
@@ -915,7 +1132,10 @@ fn apply_module_order(
   ordered_module_ids: List(Int),
 ) -> Result(Bool, AppError) {
   use current_module_ids <- result.try(course_module_ids(connection, course_id))
-  use _ <- result.try(validate_module_order(current_module_ids, ordered_module_ids))
+  use _ <- result.try(validate_module_order(
+    current_module_ids,
+    ordered_module_ids,
+  ))
 
   case ordered_module_ids == current_module_ids {
     True -> Ok(False)
@@ -1002,9 +1222,7 @@ fn insert_modules(
   modules: List(String),
 ) -> Result(Nil, AppError) {
   modules
-  |> list.index_map(fn(name, index) {
-    #(index + 1, name)
-  })
+  |> list.index_map(fn(name, index) { #(index + 1, name) })
   |> list.try_fold(Nil, fn(_, item) {
     let #(position, name) = item
     exec_with_args(
@@ -1054,6 +1272,17 @@ fn clear_course_range(
     where id = ?
     ",
     [sqlight.int(course_id)],
+    connection,
+  )
+}
+
+fn delete_schedule_entry(
+  connection: sqlight.Connection,
+  module_id: Int,
+) -> Result(Nil, AppError) {
+  exec_with_args(
+    "delete from schedule_entries where module_id = ?",
+    [sqlight.int(module_id)],
     connection,
   )
 }
@@ -1117,7 +1346,16 @@ fn module_from_row(
 }
 
 fn module_range_from_row(
-  row: #(Int, Int, String, String, String, Option(String), Option(Int), Option(Int)),
+  row: #(
+    Int,
+    Int,
+    String,
+    String,
+    String,
+    Option(String),
+    Option(Int),
+    Option(Int),
+  ),
 ) -> Option(ModuleRange) {
   case row.5, row.6, row.7 {
     Some(prefix), Some(start), Some(finish) ->
@@ -1141,12 +1379,9 @@ fn range_inclusive(start: Int, finish: Int) -> List(Int) {
   case start > finish {
     True -> []
     False ->
-      int.range(
-        from: start,
-        to: finish + 1,
-        with: [],
-        run: fn(acc, number) { [number, ..acc] },
-      )
+      int.range(from: start, to: finish + 1, with: [], run: fn(acc, number) {
+        [number, ..acc]
+      })
       |> list.reverse
   }
 }
@@ -1155,6 +1390,40 @@ fn completed_at_value(done: Bool) -> Option(String) {
   case done {
     True -> Some(date.to_iso(date.today()))
     False -> None
+  }
+}
+
+fn schedule_mutation_for_module_update(
+  module_id: Int,
+  validated_name: Option(String),
+  completed: Option(Bool),
+  order_changed: Bool,
+  schedule_is_current: Bool,
+  current_completed_at: Option(String),
+  current_scheduled_date: Option(String),
+  today_iso: String,
+) -> ScheduleMutation {
+  case order_changed {
+    True -> RebuildStoredSchedule
+    False ->
+      case completed {
+        Some(False) -> RebuildStoredSchedule
+        Some(True) ->
+          case current_completed_at {
+            Some(_) -> KeepStoredSchedule
+            None ->
+              case schedule_is_current, current_scheduled_date {
+                True, Some(scheduled_date) if scheduled_date == today_iso ->
+                  RemoveStoredModuleFromSchedule(module_id)
+                _, _ -> RebuildStoredSchedule
+              }
+          }
+        None ->
+          case validated_name {
+            Some(_) -> KeepStoredSchedule
+            None -> KeepStoredSchedule
+          }
+      }
   }
 }
 
@@ -1206,12 +1475,14 @@ fn query_one(
 ) -> Result(a, AppError) {
   use rows <- result.try(query(sql, arguments, decoder, connection))
   case rows {
-    [row, .._] -> Ok(row)
+    [row, ..] -> Ok(row)
     [] -> Error(NotFound("Expected a row but query returned none"))
   }
 }
 
-fn course_row_decoder() -> decode.Decoder(#(Int, Int, String, String, String, Option(String), Option(Int), Option(Int))) {
+fn course_row_decoder() -> decode.Decoder(
+  #(Int, Int, String, String, String, Option(String), Option(Int), Option(Int)),
+) {
   {
     use id <- decode.field(0, decode.int)
     use vendor_id <- decode.field(1, decode.int)
@@ -1252,7 +1523,9 @@ fn prerequisite_row_decoder() -> decode.Decoder(#(Int, Int, String)) {
   }
 }
 
-fn module_row_decoder() -> decode.Decoder(#(Int, Int, Int, String, Option(String), Option(String), Option(Int))) {
+fn module_row_decoder() -> decode.Decoder(
+  #(Int, Int, Int, String, Option(String), Option(String), Option(Int)),
+) {
   {
     use id <- decode.field(0, decode.int)
     use course_id <- decode.field(1, decode.int)
@@ -1261,7 +1534,47 @@ fn module_row_decoder() -> decode.Decoder(#(Int, Int, Int, String, Option(String
     use completed_at <- decode.field(4, decode.optional(decode.string))
     use scheduled_date <- decode.field(5, decode.optional(decode.string))
     use slot_index <- decode.field(6, decode.optional(decode.int))
-    decode.success(#(id, course_id, position, name, completed_at, scheduled_date, slot_index))
+    decode.success(#(
+      id,
+      course_id,
+      position,
+      name,
+      completed_at,
+      scheduled_date,
+      slot_index,
+    ))
+  }
+}
+
+fn module_update_state_row_decoder() -> decode.Decoder(
+  #(Int, Option(String), Option(String)),
+) {
+  {
+    use course_id <- decode.field(0, decode.int)
+    use completed_at <- decode.field(1, decode.optional(decode.string))
+    use scheduled_date <- decode.field(2, decode.optional(decode.string))
+    decode.success(#(course_id, completed_at, scheduled_date))
+  }
+}
+
+fn schedule_entry_row_decoder() -> decode.Decoder(
+  #(Int, String, String, String, String, Int),
+) {
+  {
+    use module_id <- decode.field(0, decode.int)
+    use vendor_name <- decode.field(1, decode.string)
+    use course_name <- decode.field(2, decode.string)
+    use module_name <- decode.field(3, decode.string)
+    use scheduled_date <- decode.field(4, decode.string)
+    use slot_index <- decode.field(5, decode.int)
+    decode.success(#(
+      module_id,
+      vendor_name,
+      course_name,
+      module_name,
+      scheduled_date,
+      slot_index,
+    ))
   }
 }
 
@@ -1277,6 +1590,10 @@ fn int_decoder() -> decode.Decoder(Int) {
   decode.field(0, decode.int, decode.success)
 }
 
+fn optional_string_decoder() -> decode.Decoder(Option(String)) {
+  decode.field(0, decode.optional(decode.string), decode.success)
+}
+
 fn string_decoder() -> decode.Decoder(String) {
   decode.field(0, decode.string, decode.success)
 }
@@ -1289,14 +1606,30 @@ fn settings_row_decoder() -> decode.Decoder(#(Bool, Int)) {
   }
 }
 
-fn ensure_app_settings_column(connection: sqlight.Connection) -> Result(Nil, AppError) {
-  case sqlight.exec(
+fn ensure_app_settings_columns(
+  connection: sqlight.Connection,
+) -> Result(Nil, AppError) {
+  use _ <- result.try(ensure_app_settings_column(
+    connection,
+    "
+      alter table app_settings
+      add column deadline_slack_days integer not null default 0
+      ",
+  ))
+  ensure_app_settings_column(
+    connection,
     "
     alter table app_settings
-    add column deadline_slack_days integer not null default 0
+    add column schedule_generated_for text
     ",
-    on: connection,
-  ) {
+  )
+}
+
+fn ensure_app_settings_column(
+  connection: sqlight.Connection,
+  statement: String,
+) -> Result(Nil, AppError) {
+  case sqlight.exec(statement, on: connection) {
     Ok(_) -> Ok(Nil)
     Error(error) ->
       case string.contains(error.message, "duplicate column name") {
@@ -1404,6 +1737,7 @@ create table if not exists schedule_entries (
 create table if not exists app_settings (
   id integer primary key,
   include_weekends integer not null,
-  deadline_slack_days integer not null default 0
+  deadline_slack_days integer not null default 0,
+  schedule_generated_for text
 );
 "

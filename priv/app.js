@@ -209,6 +209,7 @@ document.addEventListener("alpine:init", () => {
     expandedVendors: [],
     vendorColorRevision: 0,
     modalOpen: false,
+    courseVendorId: null,
     confirmDialog: null,
     toasts: [],
   });
@@ -455,22 +456,44 @@ document.addEventListener("alpine:init", () => {
 
     init() {
       const vendors = Alpine.store("app").data?.vendors || [];
-      if (vendors.length > 0 && !this.form.vendor_id) {
-        this.form.vendor_id = vendors[0].id;
-      }
+      const requestedVendorId = Alpine.store("ui").courseVendorId;
+      const selectedVendor = vendors.find((vendor) => vendor.id === requestedVendorId);
+      this.form.vendor_id = selectedVendor?.id || vendors[0]?.id || "";
     },
 
     close() {
+      Alpine.store("ui").courseVendorId = null;
       Alpine.store("ui").modalOpen = false;
     },
 
+    get explicitModules() {
+      return this.form.modules
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    },
+
+    get rangeIsValid() {
+      const start = Number(this.form.range_start);
+      const end = Number(this.form.range_end);
+      return this.form.range_prefix.trim() && start >= 1 && end >= start;
+    },
+
+    get canSubmit() {
+      if (this.submitting) return false;
+      if (!Number(this.form.vendor_id) || !this.form.name.trim() || !this.form.deadline_date) {
+        return false;
+      }
+      return this.form.mode === "range" ? this.rangeIsValid : this.explicitModules.length > 0;
+    },
+
     async submit() {
-      if (this.submitting) return;
+      if (!this.canSubmit) return;
       this.submitting = true;
 
       const payload = {
         vendor_id: Number(this.form.vendor_id),
-        name: this.form.name,
+        name: this.form.name.trim(),
         deadline_date: this.form.deadline_date,
         prerequisites: this.form.prerequisites
           .split(",")
@@ -485,10 +508,7 @@ document.addEventListener("alpine:init", () => {
           end: Number(this.form.range_end),
         };
       } else {
-        payload.modules = this.form.modules
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(Boolean);
+        payload.modules = this.explicitModules;
       }
 
       const ok = await Alpine.store("app").mutate("/api/courses", {
@@ -530,6 +550,15 @@ document.addEventListener("alpine:init", () => {
 
     setVendorColor(vendorName, color) {
       setVendorColor(vendorName, color);
+    },
+
+    openCourseModal(vendorId) {
+      const vendors = Alpine.store("app").data?.vendors || [];
+      const vendor = vendors.find((candidate) => candidate.id === vendorId);
+      if (!vendor) return;
+      const ui = Alpine.store("ui");
+      ui.courseVendorId = vendor.id;
+      ui.modalOpen = true;
     },
 
     async deleteVendor(vendorId, vendorName) {

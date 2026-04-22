@@ -560,7 +560,6 @@ fn index_html() -> String {
           x-transition:enter=\"transition-[transform,opacity] duration-300 ease-out\"
           x-transition:enter-start=\"translate-y-6 opacity-0\"
           x-transition:enter-end=\"translate-y-0 opacity-100\"
-          @click.outside=\"close()\"
         >
           <h3 class=\"text-xl mb-4\">New Course</h3>
           <form @submit.prevent=\"submit()\" class=\"flex flex-col gap-3\">
@@ -594,30 +593,30 @@ fn index_html() -> String {
             <template x-if=\"form.mode === 'explicit'\">
               <div>
                 <label class=\"block text-sm font-bold font-heading mb-1\">Modules (one per line)</label>
-                <textarea x-model=\"form.modules\" class=\"input-brutal\" rows=\"4\" placeholder=\"Module 1&#10;Module 2&#10;Module 3\"></textarea>
+                <textarea x-model=\"form.modules\" class=\"input-brutal\" rows=\"4\" placeholder=\"Module 1&#10;Module 2&#10;Module 3\" required></textarea>
               </div>
             </template>
             <template x-if=\"form.mode === 'range'\">
               <div class=\"flex flex-col gap-3\">
                 <div>
                   <label class=\"block text-sm font-bold font-heading mb-1\">Prefix</label>
-                  <input x-model=\"form.range_prefix\" class=\"input-brutal\" value=\"Module \">
+                  <input x-model=\"form.range_prefix\" class=\"input-brutal\" value=\"Module \" required>
                 </div>
                 <div class=\"flex gap-3\">
                   <div class=\"flex-1\">
                     <label class=\"block text-sm font-bold font-heading mb-1\">Start</label>
-                    <input type=\"number\" x-model.number=\"form.range_start\" class=\"input-brutal\" min=\"1\">
+                    <input type=\"number\" x-model.number=\"form.range_start\" class=\"input-brutal\" min=\"1\" required>
                   </div>
                   <div class=\"flex-1\">
                     <label class=\"block text-sm font-bold font-heading mb-1\">End</label>
-                    <input type=\"number\" x-model.number=\"form.range_end\" class=\"input-brutal\" min=\"1\">
+                    <input type=\"number\" x-model.number=\"form.range_end\" class=\"input-brutal\" min=\"1\" required>
                   </div>
                 </div>
               </div>
             </template>
             <div class=\"flex gap-3 mt-2\">
               <button type=\"button\" class=\"btn btn-ghost flex-1\" @click=\"close()\">Cancel</button>
-              <button type=\"submit\" class=\"btn btn-yellow flex-1\" :disabled=\"submitting\">
+              <button type=\"submit\" class=\"btn btn-yellow flex-1\" :disabled=\"!canSubmit\">
                 <span x-show=\"!submitting\">Create Course</span>
                 <span x-show=\"submitting\">Creating...</span>
               </button>
@@ -1011,13 +1010,6 @@ fn index_html() -> String {
             >
             <button class=\"btn btn-yellow text-sm\" @click=\"create()\" :disabled=\"!vendorName.trim()\">+ Add Vendor</button>
           </div>
-          <button
-            class=\"btn text-sm\"
-            @click=\"($store.app.data?.vendors || []).length > 0 && ($store.ui.modalOpen = true)\"
-            :disabled=\"($store.app.data?.vendors || []).length === 0\"
-          >
-            + Add Course
-          </button>
         </div>
 
         <!-- Vendor accordions -->
@@ -1071,14 +1063,19 @@ fn index_html() -> String {
                 x-transition:leave-end=\"opacity-0 -translate-y-1\"
               >
                 <div class=\"border-t-3 border-ink\">
+                  <div class=\"p-4 bg-yellow/10 flex flex-wrap items-center justify-between gap-3\">
+                    <span class=\"text-sm font-heading font-bold\">Courses</span>
+                    <button class=\"btn btn-yellow text-sm\" @click=\"openCourseModal(vendor.id)\">+ Add Course</button>
+                  </div>
+
                   <!-- Empty vendor -->
-                  <div x-show=\"vendor.courses.length === 0\" class=\"p-5\">
+                  <div x-show=\"vendor.courses.length === 0\" class=\"p-5 border-t-3 border-ink\">
                     <p class=\"text-sm\">No courses yet.</p>
                   </div>
 
                   <!-- Course cards -->
                   <template x-for=\"(course, ci) in vendor.courses\" :key=\"course.id\">
-                    <div :class=\"ci > 0 ? 'border-t-3 border-ink' : ''\" class=\"p-5\" x-data=\"courseCard(course, vendor)\">
+                    <div class=\"p-5 border-t-3 border-ink\" x-data=\"courseCard(course, vendor)\">
                       <div class=\"flex items-center justify-between gap-3 mb-4\">
                         <!-- Course name (inline edit) -->
                         <div class=\"flex-1 min-w-0\">
@@ -1251,7 +1248,6 @@ fn index_html() -> String {
         <div x-show=\"($store.app.data?.vendors || []).length === 0\" class=\"card bg-surface p-8 text-center\">
           <h3 class=\"text-xl mb-2\">No vendors yet</h3>
           <p class=\"text-sm mb-4\">Add a vendor to get started with scheduling your courses.</p>
-          <button class=\"btn text-sm mx-auto\" disabled>+ Add Course</button>
         </div>
       </div>
 

@@ -2,19 +2,20 @@ import aliahan/config
 import aliahan/date
 import aliahan/env
 import aliahan/model
-import aliahan/store
 import aliahan/scheduler
+import aliahan/store
 import aliahan/web
 import gleam/http
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/order.{Lt}
+import gleam/order.{Eq, Lt}
 import gleam/string
 import gleam/time/calendar
 import gleeunit
 import simplifile
+import sqlight
 import wisp/simulate
 
 pub fn main() -> Nil {
@@ -22,7 +23,8 @@ pub fn main() -> Nil {
 }
 
 pub fn parse_courses_toml_supports_generated_ranges_test() {
-  let toml = "
+  let toml =
+    "
   [\"Vendor\".\"Generated\"]
   module_range = { prefix = \"Module \", start = 2, end = 4 }
   deadline = 2026-04-01T23:59:59-03:00
@@ -33,9 +35,12 @@ pub fn parse_courses_toml_supports_generated_ranges_test() {
   assert course.course_name == "Generated"
   assert course.prerequisites == []
   assert course.deadline == calendar.Date(2026, calendar.April, 1)
-  assert course.modules == model.GeneratedRange(
-    model.ModuleRange(prefix: "Module ", start: 2, end: 4),
-  )
+  assert course.modules
+    == model.GeneratedRange(model.ModuleRange(
+      prefix: "Module ",
+      start: 2,
+      end: 4,
+    ))
 }
 
 pub fn index_html_uses_local_alpine_bundle_test() {
@@ -97,21 +102,26 @@ pub fn index_html_disables_settings_without_bootstrap_data_test() {
   )
 }
 
-pub fn index_html_disables_add_course_without_vendors_test() {
+pub fn index_html_scopes_add_course_to_vendor_test() {
   let response = web.handle(simulate.request(http.Get, "/"), "priv")
   assert response.status == 200
 
   let body = simulate.read_body(response)
   assert string.contains(
     body,
-    "@click=\"($store.app.data?.vendors || []).length > 0 && ($store.ui.modalOpen = true)\"",
+    "@click=\"openCourseModal(vendor.id)\">+ Add Course</button>",
   )
+  assert string.contains(body, ":disabled=\"!canSubmit\"")
   assert string.contains(
     body,
-    ":disabled=\"($store.app.data?.vendors || []).length === 0\"",
+    "placeholder=\"Module 1&#10;Module 2&#10;Module 3\" required",
   )
   assert string.contains(body, "No vendors yet")
-  assert string.contains(body, "class=\"btn text-sm mx-auto\" disabled>+ Add Course</button>")
+  assert string.contains(body, "@click.outside=\"close()\"") == False
+  assert string.contains(
+    body,
+    "class=\"btn text-sm mx-auto\" disabled>+ Add Course</button>",
+  ) == False
 }
 
 pub fn index_html_passes_event_to_module_toggle_test() {
@@ -124,7 +134,10 @@ pub fn index_html_passes_event_to_module_toggle_test() {
 
 pub fn app_js_shares_vendor_color_revision_across_views_test() {
   let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "const VENDOR_COLOR_KEY = \"aliahan_vendor_colors_v2\";")
+  assert string.contains(
+    body,
+    "const VENDOR_COLOR_KEY = \"aliahan_vendor_colors_v2\";",
+  )
   assert string.contains(body, "const colors = Object.create(null);")
   assert string.contains(
     body,
@@ -143,9 +156,15 @@ pub fn app_js_shares_vendor_color_revision_across_views_test() {
     body,
     "if (!Object.prototype.hasOwnProperty.call(vendorColors, vendorName)) return null;",
   )
-  assert string.contains(body, "return typeof color === \"string\" ? color : null;")
+  assert string.contains(
+    body,
+    "return typeof color === \"string\" ? color : null;",
+  )
   assert string.contains(body, "const explicit = getVendorColor(vendorName);")
-  assert string.contains(body, "return vendorName ? vendorColorFallback(vendorName) : VENDOR_COLORS[0];")
+  assert string.contains(
+    body,
+    "return vendorName ? vendorColorFallback(vendorName) : VENDOR_COLORS[0];",
+  )
   assert string.contains(body, "ui.vendorColorRevision += 1")
   assert string.contains(body, "vendorColors[vendorId]") == False
 }
@@ -157,6 +176,35 @@ pub fn app_js_mutate_treats_refresh_separately_from_write_success_test() {
   assert string.contains(body, "return await this.refresh();") == False
 }
 
+pub fn app_js_opens_course_modal_for_selected_vendor_test() {
+  let assert Ok(body) = simplifile.read("priv/app.js")
+  assert string.contains(body, "courseVendorId: null")
+  assert string.contains(
+    body,
+    "const requestedVendorId = Alpine.store(\"ui\").courseVendorId;",
+  )
+  assert string.contains(
+    body,
+    "this.form.vendor_id = selectedVendor?.id || vendors[0]?.id || \"\";",
+  )
+  assert string.contains(body, "Alpine.store(\"ui\").courseVendorId = null;")
+  assert string.contains(body, "openCourseModal(vendorId)")
+  assert string.contains(
+    body,
+    "ui.courseVendorId = vendor.id;\n      ui.modalOpen = true;",
+  )
+}
+
+pub fn app_js_course_modal_requires_valid_modules_test() {
+  let assert Ok(body) = simplifile.read("priv/app.js")
+  assert string.contains(body, "get explicitModules()")
+  assert string.contains(body, "get rangeIsValid()")
+  assert string.contains(body, "get canSubmit()")
+  assert string.contains(body, "return this.form.mode === \"range\" ? this.rangeIsValid : this.explicitModules.length > 0;")
+  assert string.contains(body, "if (!this.canSubmit) return;")
+  assert string.contains(body, "payload.modules = this.explicitModules;")
+}
+
 pub fn app_js_reverts_checkbox_after_failed_module_toggle_test() {
   let assert Ok(body) = simplifile.read("priv/app.js")
   assert string.contains(body, "_moduleCompletionPending: Object.create(null),")
@@ -166,7 +214,10 @@ pub fn app_js_reverts_checkbox_after_failed_module_toggle_test() {
     body,
     "if (this.isModuleCompletionSaving(mod.id)) {\n        event.target.checked = !!this._moduleCompletionPending[mod.id];\n        return;\n      }",
   )
-  assert string.contains(body, "this._moduleCompletionPending[mod.id] = checked;")
+  assert string.contains(
+    body,
+    "this._moduleCompletionPending[mod.id] = checked;",
+  )
   assert string.contains(body, "event.target.disabled = true;")
   assert string.contains(body, "event.target.checked = !!mod.completed_at;")
   assert string.contains(body, "delete this._moduleCompletionPending[mod.id];")
@@ -179,9 +230,15 @@ pub fn app_js_reverts_checkbox_after_failed_module_toggle_test() {
 pub fn app_js_reverts_controls_after_failed_settings_update_test() {
   let assert Ok(body) = simplifile.read("priv/app.js")
   assert string.contains(body, "async toggleWeekends(event)")
-  assert string.contains(body, "event.target.checked = !!settings.include_weekends;")
+  assert string.contains(
+    body,
+    "event.target.checked = !!settings.include_weekends;",
+  )
   assert string.contains(body, "async updateSlackDays(event)")
-  assert string.contains(body, "event.target.value = String(settings.deadline_slack_days);")
+  assert string.contains(
+    body,
+    "event.target.value = String(settings.deadline_slack_days);",
+  )
 }
 
 pub fn app_js_settings_and_courses_only_patch_changed_fields_test() {
@@ -195,8 +252,13 @@ pub fn app_js_settings_and_courses_only_patch_changed_fields_test() {
     "body: JSON.stringify({\n          deadline_slack_days: deadlineSlackDays,\n        }),",
   )
   assert string.contains(body, "body: JSON.stringify(changes),")
-  assert string.contains(body, "deadline_slack_days: settings.deadline_slack_days") == False
-  assert string.contains(body, "include_weekends: settings.include_weekends") == False
+  assert string.contains(
+      body,
+      "deadline_slack_days: settings.deadline_slack_days",
+    )
+    == False
+  assert string.contains(body, "include_weekends: settings.include_weekends")
+    == False
   assert string.contains(body, "name: changes.name ?? course.name") == False
 }
 
@@ -215,7 +277,10 @@ pub fn app_js_preserves_drag_snapshot_until_reorder_finishes_test() {
     body,
     "if (!this._saving) {\n        this._dragSnapshot = null;\n        this._dropHandled = false;\n      }",
   )
-  assert string.contains(body, "restoreDragSnapshot(snapshot = this._dragSnapshot)")
+  assert string.contains(
+    body,
+    "restoreDragSnapshot(snapshot = this._dragSnapshot)",
+  )
 }
 
 pub fn app_js_calendar_popover_tracks_full_day_entries_test() {
@@ -235,8 +300,14 @@ pub fn index_html_schedule_overflow_opens_day_popover_test() {
 
   let body = simulate.read_body(response)
   assert string.contains(body, "@click=\"openPopover(day.entries, entry)\"")
-  assert string.contains(body, "@click=\"openPopover(day.entries, day.entries[3])\"")
-  assert string.contains(body, "@click=\"openPopover(day.entries, day.entries[2])\"")
+  assert string.contains(
+    body,
+    "@click=\"openPopover(day.entries, day.entries[3])\"",
+  )
+  assert string.contains(
+    body,
+    "@click=\"openPopover(day.entries, day.entries[2])\"",
+  )
   assert string.contains(body, "x-show=\"popover.entries.length > 1\"")
   assert string.contains(body, "x-for=\"entry in popover.entries\"")
 }
@@ -254,19 +325,28 @@ pub fn index_html_vendor_color_picker_uses_vendor_names_test() {
 
 pub fn app_js_optimistically_updates_calendar_targets_before_bootstrap_test() {
   let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "today() {\n      return this.data?.today || todayIso();\n    },")
+  assert string.contains(
+    body,
+    "today() {\n      return this.data?.today || todayIso();\n    },",
+  )
   assert string.contains(body, "_bootstrapRequestId: 0")
   assert string.contains(body, "const requestId = ++this._bootstrapRequestId;")
   assert string.contains(
     body,
     "const targetAnchor = anchor || todayIso();\n      this.error = \"\";\n      this.view = view;\n      this.anchor = targetAnchor;",
   )
-  assert string.contains(body, "if (requestId !== this._bootstrapRequestId) return true;")
+  assert string.contains(
+    body,
+    "if (requestId !== this._bootstrapRequestId) return true;",
+  )
   assert string.contains(
     body,
     "const schedule = this.data?.schedule;\n        if (schedule) {\n          this.view = schedule.view;\n          this.anchor = schedule.anchor;\n        }",
   )
-  assert string.contains(body, "return dateStr === Alpine.store(\"app\").today();")
+  assert string.contains(
+    body,
+    "return dateStr === Alpine.store(\"app\").today();",
+  )
   assert string.contains(body, "anchor: app.today(),")
   assert string.contains(body, "deadline_date: Alpine.store(\"app\").today(),")
 }
@@ -434,8 +514,9 @@ pub fn scheduler_fills_gaps_before_tighter_course_finishes_test() {
     entries |> list.filter(fn(entry) { entry.course_name == "Loose" })
 
   let assert [_, _, _, tight_last] = tight_entries
-  let assert [loose_first, .._] = loose_entries
-  assert date.compare(loose_first.scheduled_date, tight_last.scheduled_date) == Lt
+  let assert [loose_first, ..] = loose_entries
+  assert date.compare(loose_first.scheduled_date, tight_last.scheduled_date)
+    == Lt
 }
 
 pub fn scheduler_prefers_finishing_before_deadline_test() {
@@ -546,7 +627,7 @@ pub fn patch_module_returns_error_and_keeps_state_test() {
         course_name: "Atomic",
         modules: model.ExplicitModules(["First", "Second"]),
       )
-    let assert [first, .._] = course.modules
+    let assert [first, ..] = course.modules
 
     let request =
       simulate.request(http.Patch, "/api/modules/" <> int.to_string(first.id))
@@ -565,64 +646,242 @@ pub fn patch_module_returns_error_and_keeps_state_test() {
     )
 
     let updated = course_named("Vendor", "Atomic")
-    let assert [updated_first, .._] = updated.modules
+    let assert [updated_first, ..] = updated.modules
     assert updated_first.name == "First"
     assert updated_first.completed_at == None
   })
 }
 
-pub fn patch_settings_preserves_deadline_slack_days_when_omitted_test() {
-  with_isolated_store("patch_settings_preserves_deadline_slack_days_when_omitted", fn(_, _) {
+pub fn completing_todays_module_keeps_today_blank_across_reads_and_name_patch_test() {
+  with_isolated_store(
+    "completing_todays_module_keeps_today_blank_across_reads_and_name_patch",
+    fn(_, _) {
+      let today = date.today()
+      let tomorrow = date.day_after(today)
+      let day_after_tomorrow = date.day_after(tomorrow)
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Foundations",
+          deadline: tomorrow,
+          prerequisites: [],
+          modules: model.ExplicitModules(["Today", "Tomorrow"]),
+        ))
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Advanced",
+          deadline: day_after_tomorrow,
+          prerequisites: ["Foundations"],
+          modules: model.ExplicitModules(["Blocked"]),
+        ))
+
+      let foundations = course_named("Vendor", "Foundations")
+      let advanced = course_named("Vendor", "Advanced")
+      let assert [today_module, tomorrow_module] = foundations.modules
+      let assert [blocked_module] = advanced.modules
+      assert today_module.scheduled_date == Some(today)
+      assert tomorrow_module.scheduled_date == Some(tomorrow)
+      assert blocked_module.scheduled_date == Some(day_after_tomorrow)
+
+      let assert Ok(Nil) = store.set_module_completed(today_module.id, True)
+
+      let first_read = bootstrap_for(today)
+      assert schedule_module_names_on(first_read, today) == []
+      assert schedule_module_names_on(first_read, tomorrow) == ["Tomorrow"]
+      assert schedule_module_names_on(first_read, day_after_tomorrow)
+        == ["Blocked"]
+
+      let second_read = bootstrap_for(today)
+      assert schedule_module_names_on(second_read, today) == []
+      assert schedule_module_names_on(second_read, tomorrow) == ["Tomorrow"]
+
+      let assert Ok(Nil) =
+        store.rename_module(tomorrow_module.id, "Tomorrow renamed")
+      let after_rename = bootstrap_for(today)
+      assert schedule_module_names_on(after_rename, today) == []
+      assert schedule_module_names_on(after_rename, tomorrow)
+        == ["Tomorrow renamed"]
+      assert schedule_module_names_on(after_rename, day_after_tomorrow)
+        == ["Blocked"]
+
+      let updated_foundations = course_named("Vendor", "Foundations")
+      let assert [updated_today_module, updated_tomorrow_module] =
+        updated_foundations.modules
+      assert updated_today_module.completed_at == Some(date.to_iso(today))
+      assert updated_today_module.scheduled_date == None
+      assert updated_tomorrow_module.scheduled_date == Some(tomorrow)
+    },
+  )
+}
+
+pub fn completing_non_today_module_rebuilds_and_unblocks_future_work_test() {
+  with_isolated_store(
+    "completing_non_today_module_rebuilds_and_unblocks_future_work",
+    fn(_, _) {
+      let today = date.today()
+      let tomorrow = date.day_after(today)
+      let day_after_tomorrow = date.day_after(tomorrow)
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Foundations",
+          deadline: tomorrow,
+          prerequisites: [],
+          modules: model.ExplicitModules(["Today", "Tomorrow"]),
+        ))
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Advanced",
+          deadline: day_after_tomorrow,
+          prerequisites: ["Foundations"],
+          modules: model.ExplicitModules(["Blocked"]),
+        ))
+
+      let foundations = course_named("Vendor", "Foundations")
+      let assert [today_module, tomorrow_module] = foundations.modules
+
+      let assert Ok(Nil) = store.set_module_completed(today_module.id, True)
+      let assert Ok(Nil) = store.set_module_completed(tomorrow_module.id, True)
+
+      let rebuilt = bootstrap_for(today)
+      assert schedule_module_names_on(rebuilt, today) == ["Blocked"]
+      assert schedule_module_names_on(rebuilt, tomorrow) == []
+      assert schedule_module_names_on(rebuilt, day_after_tomorrow) == []
+
+      let updated_advanced = course_named("Vendor", "Advanced")
+      let assert [blocked_module] = updated_advanced.modules
+      assert blocked_module.scheduled_date == Some(today)
+    },
+  )
+}
+
+pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
+  with_isolated_store("stale_schedule_metadata_rebuilds_blank_today", fn(_, _) {
+    let today = date.today()
+    let tomorrow = date.day_after(today)
+
     let assert Ok(Nil) = store.initialise()
+    let assert Ok(Nil) =
+      store.set_settings(model.SettingsPatch(
+        include_weekends: Some(True),
+        deadline_slack_days: None,
+      ))
+    let assert Ok(Nil) = store.create_vendor("Vendor")
+    let vendor = vendor_named("Vendor")
+    let assert Ok(Nil) =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Foundations",
+        deadline: tomorrow,
+        prerequisites: [],
+        modules: model.ExplicitModules(["Today", "Tomorrow"]),
+      ))
 
-    let baseline_request =
-      simulate.request(http.Patch, "/api/settings")
-      |> simulate.json_body(
-        json.object([
-          #("include_weekends", json.bool(False)),
-          #("deadline_slack_days", json.int(3)),
-        ]),
-      )
-    let baseline_response = web.handle(baseline_request, "priv")
-    assert baseline_response.status == 200
+    let foundations = course_named("Vendor", "Foundations")
+    let assert [today_module, ..] = foundations.modules
+    let assert Ok(Nil) = store.set_module_completed(today_module.id, True)
 
-    let request =
-      simulate.request(http.Patch, "/api/settings")
-      |> simulate.json_body(json.object([#("include_weekends", json.bool(True))]))
-    let response = web.handle(request, "priv")
+    let blank_today = bootstrap_for(today)
+    assert schedule_module_names_on(blank_today, today) == []
+    assert schedule_module_names_on(blank_today, tomorrow) == ["Tomorrow"]
 
-    assert response.status == 200
-    let settings = bootstrap_data().settings
-    assert settings.include_weekends == True
-    assert settings.deadline_slack_days == 3
+    let assert Ok(connection) = sqlight.open(store.database_path())
+    let stale_date = date.to_iso(date.day_before(today))
+    let assert Ok(_) = sqlight.exec("
+        update app_settings
+        set schedule_generated_for = '" <> stale_date <> "'
+        where id = 1
+        ", on: connection)
+    let assert Ok(_) = sqlight.close(connection)
+
+    let rebuilt = bootstrap_for(today)
+    assert schedule_module_names_on(rebuilt, today) == ["Tomorrow"]
+    assert schedule_module_names_on(rebuilt, tomorrow) == []
   })
 }
 
+pub fn patch_settings_preserves_deadline_slack_days_when_omitted_test() {
+  with_isolated_store(
+    "patch_settings_preserves_deadline_slack_days_when_omitted",
+    fn(_, _) {
+      let assert Ok(Nil) = store.initialise()
+
+      let baseline_request =
+        simulate.request(http.Patch, "/api/settings")
+        |> simulate.json_body(
+          json.object([
+            #("include_weekends", json.bool(False)),
+            #("deadline_slack_days", json.int(3)),
+          ]),
+        )
+      let baseline_response = web.handle(baseline_request, "priv")
+      assert baseline_response.status == 200
+
+      let request =
+        simulate.request(http.Patch, "/api/settings")
+        |> simulate.json_body(
+          json.object([#("include_weekends", json.bool(True))]),
+        )
+      let response = web.handle(request, "priv")
+
+      assert response.status == 200
+      let settings = bootstrap_data().settings
+      assert settings.include_weekends == True
+      assert settings.deadline_slack_days == 3
+    },
+  )
+}
+
 pub fn patch_settings_preserves_include_weekends_when_omitted_test() {
-  with_isolated_store("patch_settings_preserves_include_weekends_when_omitted", fn(_, _) {
-    let assert Ok(Nil) = store.initialise()
+  with_isolated_store(
+    "patch_settings_preserves_include_weekends_when_omitted",
+    fn(_, _) {
+      let assert Ok(Nil) = store.initialise()
 
-    let baseline_request =
-      simulate.request(http.Patch, "/api/settings")
-      |> simulate.json_body(
-        json.object([
-          #("include_weekends", json.bool(True)),
-          #("deadline_slack_days", json.int(1)),
-        ]),
-      )
-    let baseline_response = web.handle(baseline_request, "priv")
-    assert baseline_response.status == 200
+      let baseline_request =
+        simulate.request(http.Patch, "/api/settings")
+        |> simulate.json_body(
+          json.object([
+            #("include_weekends", json.bool(True)),
+            #("deadline_slack_days", json.int(1)),
+          ]),
+        )
+      let baseline_response = web.handle(baseline_request, "priv")
+      assert baseline_response.status == 200
 
-    let request =
-      simulate.request(http.Patch, "/api/settings")
-      |> simulate.json_body(json.object([#("deadline_slack_days", json.int(4))]))
-    let response = web.handle(request, "priv")
+      let request =
+        simulate.request(http.Patch, "/api/settings")
+        |> simulate.json_body(
+          json.object([#("deadline_slack_days", json.int(4))]),
+        )
+      let response = web.handle(request, "priv")
 
-    assert response.status == 200
-    let settings = bootstrap_data().settings
-    assert settings.include_weekends == True
-    assert settings.deadline_slack_days == 4
-  })
+      assert response.status == 200
+      let settings = bootstrap_data().settings
+      assert settings.include_weekends == True
+      assert settings.deadline_slack_days == 4
+    },
+  )
 }
 
 pub fn patch_settings_rejects_empty_payload_test() {
@@ -643,80 +902,90 @@ pub fn patch_settings_rejects_empty_payload_test() {
 }
 
 pub fn patch_course_preserves_previous_name_when_updating_deadline_test() {
-  with_isolated_store("patch_course_preserves_previous_name_when_updating_deadline", fn(_, _) {
-    let assert Ok(Nil) = store.initialise()
-    let course =
-      seed_course(
-        vendor_name: "Vendor",
-        course_name: "Original",
-        modules: model.ExplicitModules(["Only module"]),
-      )
+  with_isolated_store(
+    "patch_course_preserves_previous_name_when_updating_deadline",
+    fn(_, _) {
+      let assert Ok(Nil) = store.initialise()
+      let course =
+        seed_course(
+          vendor_name: "Vendor",
+          course_name: "Original",
+          modules: model.ExplicitModules(["Only module"]),
+        )
 
-    let rename_request =
-      simulate.request(http.Patch, "/api/courses/" <> int.to_string(course.id))
-      |> simulate.json_body(json.object([#("name", json.string("Renamed"))]))
-    let rename_response = web.handle(rename_request, "priv")
-    assert rename_response.status == 200
+      let rename_request =
+        simulate.request(
+          http.Patch,
+          "/api/courses/" <> int.to_string(course.id),
+        )
+        |> simulate.json_body(json.object([#("name", json.string("Renamed"))]))
+      let rename_response = web.handle(rename_request, "priv")
+      assert rename_response.status == 200
 
-    let deadline_request =
-      simulate.request(http.Patch, "/api/courses/" <> int.to_string(course.id))
-      |> simulate.json_body(
-        json.object([#("deadline_date", json.string("2026-05-15"))]),
-      )
-    let deadline_response = web.handle(deadline_request, "priv")
-    assert deadline_response.status == 200
+      let deadline_request =
+        simulate.request(
+          http.Patch,
+          "/api/courses/" <> int.to_string(course.id),
+        )
+        |> simulate.json_body(
+          json.object([#("deadline_date", json.string("2026-05-15"))]),
+        )
+      let deadline_response = web.handle(deadline_request, "priv")
+      assert deadline_response.status == 200
 
-    let updated = course_by_id(course.id)
-    assert updated.name == "Renamed"
-    assert updated.deadline == calendar.Date(2026, calendar.May, 15)
-    assert updated.prerequisites == []
-  })
+      let updated = course_by_id(course.id)
+      assert updated.name == "Renamed"
+      assert updated.deadline == calendar.Date(2026, calendar.May, 15)
+      assert updated.prerequisites == []
+    },
+  )
 }
 
 pub fn patch_course_prerequisites_preserve_name_and_deadline_test() {
-  with_isolated_store("patch_course_prerequisites_preserve_name_and_deadline", fn(_, _) {
-    let assert Ok(Nil) = store.initialise()
-    let assert Ok(Nil) = store.create_vendor("Vendor")
-    let vendor = vendor_named("Vendor")
+  with_isolated_store(
+    "patch_course_prerequisites_preserve_name_and_deadline",
+    fn(_, _) {
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
 
-    let assert Ok(Nil) = store.create_course(
-      model.NewCourseInput(
-        vendor_id: vendor.id,
-        name: "Intro",
-        deadline: calendar.Date(2026, calendar.April, 10),
-        prerequisites: [],
-        modules: model.ExplicitModules(["Intro 1"]),
-      ),
-    )
-    let assert Ok(Nil) = store.create_course(
-      model.NewCourseInput(
-        vendor_id: vendor.id,
-        name: "Main",
-        deadline: calendar.Date(2026, calendar.April, 30),
-        prerequisites: [],
-        modules: model.ExplicitModules(["Main 1"]),
-      ),
-    )
-    let course = course_named("Vendor", "Main")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Intro",
+          deadline: calendar.Date(2026, calendar.April, 10),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Intro 1"]),
+        ))
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Main",
+          deadline: calendar.Date(2026, calendar.April, 30),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Main 1"]),
+        ))
+      let course = course_named("Vendor", "Main")
 
-    let request =
-      simulate.request(http.Patch, "/api/courses/" <> int.to_string(course.id))
-      |> simulate.json_body(
-        json.object([
-          #(
-            "prerequisites",
-            json.array(from: ["Intro"], of: json.string),
-          ),
-        ]),
-      )
-    let response = web.handle(request, "priv")
+      let request =
+        simulate.request(
+          http.Patch,
+          "/api/courses/" <> int.to_string(course.id),
+        )
+        |> simulate.json_body(
+          json.object([
+            #("prerequisites", json.array(from: ["Intro"], of: json.string)),
+          ]),
+        )
+      let response = web.handle(request, "priv")
 
-    assert response.status == 200
-    let updated = course_by_id(course.id)
-    assert updated.name == "Main"
-    assert updated.deadline == calendar.Date(2026, calendar.April, 30)
-    assert updated.prerequisites == ["Intro"]
-  })
+      assert response.status == 200
+      let updated = course_by_id(course.id)
+      assert updated.name == "Main"
+      assert updated.deadline == calendar.Date(2026, calendar.April, 30)
+      assert updated.prerequisites == ["Intro"]
+    },
+  )
 }
 
 pub fn patch_course_rejects_empty_payload_test() {
@@ -761,11 +1030,12 @@ pub fn patch_module_position_uses_api_numbering_test() {
     let keep_last_response = web.handle(keep_last_request, "priv")
 
     assert keep_last_response.status == 200
-    assert module_names(course_named("Vendor", "Positions").modules) == [
-      "One",
-      "Two",
-      "Three",
-    ]
+    assert module_names(course_named("Vendor", "Positions").modules)
+      == [
+        "One",
+        "Two",
+        "Three",
+      ]
 
     let move_to_last_request =
       simulate.request(http.Patch, "/api/modules/" <> int.to_string(first.id))
@@ -775,11 +1045,12 @@ pub fn patch_module_position_uses_api_numbering_test() {
     let move_to_last_response = web.handle(move_to_last_request, "priv")
 
     assert move_to_last_response.status == 200
-    assert module_names(course_named("Vendor", "Positions").modules) == [
-      "Two",
-      "Three",
-      "One",
-    ]
+    assert module_names(course_named("Vendor", "Positions").modules)
+      == [
+        "Two",
+        "Three",
+        "One",
+      ]
   })
 }
 
@@ -852,41 +1123,48 @@ pub fn reorder_modules_persists_requested_order_test() {
 }
 
 pub fn set_module_position_clears_generated_range_snapshot_test() {
-  with_isolated_store("set_module_position_clears_generated_range_snapshot", fn(db_path, toml_path) {
-    let assert Ok(Nil) = store.initialise()
-    let course =
-      seed_course(
-        vendor_name: "Vendor",
-        course_name: "Generated",
-        modules: model.GeneratedRange(
-          model.ModuleRange(prefix: "Module ", start: 1, end: 3),
-        ),
+  with_isolated_store(
+    "set_module_position_clears_generated_range_snapshot",
+    fn(db_path, toml_path) {
+      let assert Ok(Nil) = store.initialise()
+      let course =
+        seed_course(
+          vendor_name: "Vendor",
+          course_name: "Generated",
+          modules: model.GeneratedRange(model.ModuleRange(
+            prefix: "Module ",
+            start: 1,
+            end: 3,
+          )),
+        )
+      let assert [_, _, third] = course.modules
+
+      let assert Ok(Nil) = store.set_module_position(third.id, 1)
+
+      let reordered = course_named("Vendor", "Generated")
+      assert reordered.module_range == None
+      assert module_names(reordered.modules)
+        == ["Module 3", "Module 1", "Module 2"]
+      assert module_positions(reordered.modules) == [1, 2, 3]
+
+      let assert Ok(snapshot) = simplifile.read(toml_path)
+      assert string.contains(
+        snapshot,
+        "modules = [ \"Module 3\", \"Module 1\", \"Module 2\" ]",
       )
-    let assert [_, _, third] = course.modules
+      assert string.contains(snapshot, "module_range =") == False
 
-    let assert Ok(Nil) = store.set_module_position(third.id, 1)
+      let _ = simplifile.delete(db_path)
+      let assert Ok(Nil) = store.initialise()
 
-    let reordered = course_named("Vendor", "Generated")
-    assert reordered.module_range == None
-    assert module_names(reordered.modules) == ["Module 3", "Module 1", "Module 2"]
-    assert module_positions(reordered.modules) == [1, 2, 3]
-
-    let assert Ok(snapshot) = simplifile.read(toml_path)
-    assert string.contains(
-      snapshot,
-      "modules = [ \"Module 3\", \"Module 1\", \"Module 2\" ]",
-    )
-    assert string.contains(snapshot, "module_range =") == False
-
-    let _ = simplifile.delete(db_path)
-	    let assert Ok(Nil) = store.initialise()
-	
-	    let imported = course_named("Vendor", "Generated")
-	    assert imported.module_range == None
-	    assert module_names(imported.modules) == ["Module 3", "Module 1", "Module 2"]
-	    assert module_positions(imported.modules) == [1, 2, 3]
-	  })
-		}
+      let imported = course_named("Vendor", "Generated")
+      assert imported.module_range == None
+      assert module_names(imported.modules)
+        == ["Module 3", "Module 1", "Module 2"]
+      assert module_positions(imported.modules) == [1, 2, 3]
+    },
+  )
+}
 
 pub fn initialise_succeeds_when_snapshot_export_path_is_invalid_test() {
   let base = "/tmp/initialise_snapshot_export_path_invalid"
@@ -934,7 +1212,8 @@ pub fn database_path_ignores_empty_override_test() {
 }
 
 pub fn courses_toml_path_ignores_empty_override_without_database_override_test() {
-  let path = with_store_path_env(None, Some(""), fn() { store.courses_toml_path() })
+  let path =
+    with_store_path_env(None, Some(""), fn() { store.courses_toml_path() })
   assert path == "courses.toml"
 }
 
@@ -1045,10 +1324,7 @@ fn module(
   )
 }
 
-fn with_isolated_store(
-  name: String,
-  run: fn(String, String) -> Nil,
-) -> Nil {
+fn with_isolated_store(name: String, run: fn(String, String) -> Nil) -> Nil {
   let base = "/tmp/" <> name
   let db_path = base <> "/aliahan.sqlite3"
   let toml_path = base <> "/courses.toml"
@@ -1106,15 +1382,14 @@ fn seed_course(
   let assert Ok(Nil) = store.create_vendor(vendor_name)
   let vendor = vendor_named(vendor_name)
 
-  let assert Ok(Nil) = store.create_course(
-    model.NewCourseInput(
+  let assert Ok(Nil) =
+    store.create_course(model.NewCourseInput(
       vendor_id: vendor.id,
       name: course_name,
       deadline: calendar.Date(2026, calendar.April, 30),
       prerequisites: [],
       modules: modules,
-    ),
-  )
+    ))
 
   course_named(vendor_name, course_name)
 }
@@ -1125,19 +1400,22 @@ fn bootstrap_data() -> model.BootstrapData {
   data
 }
 
+fn bootstrap_for(anchor: calendar.Date) -> model.BootstrapData {
+  let assert Ok(data) = store.bootstrap("week", anchor)
+  data
+}
+
 fn vendor_named(vendor_name: String) -> model.Vendor {
   let data = bootstrap_data()
-  let assert Ok(vendor) = list.find(data.vendors, fn(vendor) {
-    vendor.name == vendor_name
-  })
+  let assert Ok(vendor) =
+    list.find(data.vendors, fn(vendor) { vendor.name == vendor_name })
   vendor
 }
 
 fn course_named(vendor_name: String, course_name: String) -> model.Course {
   let vendor = vendor_named(vendor_name)
-  let assert Ok(course) = list.find(vendor.courses, fn(course) {
-    course.name == course_name
-  })
+  let assert Ok(course) =
+    list.find(vendor.courses, fn(course) { course.name == course_name })
   course
 }
 
@@ -1146,12 +1424,9 @@ fn course_by_id(course_id: Int) -> model.Course {
   let vendors = data.vendors
   let courses =
     vendors
-    |> list.fold([], fn(acc, vendor) {
-      list.append(vendor.courses, acc)
-    })
-  let assert Ok(course) = list.find(courses, fn(course) {
-    course.id == course_id
-  })
+    |> list.fold([], fn(acc, vendor) { list.append(vendor.courses, acc) })
+  let assert Ok(course) =
+    list.find(courses, fn(course) { course.id == course_id })
   course
 }
 
@@ -1161,4 +1436,15 @@ fn module_names(modules: List(model.Module)) -> List(String) {
 
 fn module_positions(modules: List(model.Module)) -> List(Int) {
   modules |> list.map(fn(module) { module.position })
+}
+
+fn schedule_module_names_on(
+  data: model.BootstrapData,
+  day: calendar.Date,
+) -> List(String) {
+  let assert Ok(schedule_day) =
+    list.find(data.schedule.days, fn(schedule_day) {
+      date.compare(schedule_day.date, day) == Eq
+    })
+  schedule_day.entries |> list.map(fn(entry) { entry.module_name })
 }
