@@ -1,9 +1,9 @@
 import aliahan/date
-import aliahan/model as model
+import aliahan/model
 import aliahan/store
 import gleam/dynamic.{type Dynamic}
-import gleam/dynamic/decode as decode
-import gleam/http as http
+import gleam/dynamic/decode
+import gleam/http
 import gleam/int
 import gleam/json
 import gleam/list
@@ -31,7 +31,9 @@ pub fn handle(request: wisp.Request, priv_dir: String) -> wisp.Response {
     http.Patch, ["api", "courses", course_id] ->
       wisp.require_json(request, fn(body) { update_course(course_id, body) })
     http.Patch, ["api", "courses", course_id, "modules"] ->
-      wisp.require_json(request, fn(body) { reorder_course_modules(course_id, body) })
+      wisp.require_json(request, fn(body) {
+        reorder_course_modules(course_id, body)
+      })
     http.Delete, ["api", "courses", course_id] -> delete_course(course_id)
     http.Post, ["api", "courses", course_id, "modules"] ->
       wisp.require_json(request, fn(body) { add_module(course_id, body) })
@@ -43,25 +45,33 @@ pub fn handle(request: wisp.Request, priv_dir: String) -> wisp.Response {
 }
 
 fn handle_bootstrap(request: wisp.Request) -> wisp.Response {
-  let #(view, anchor) = request_view(request)
-  case store.bootstrap(view, anchor) {
-    Ok(data) -> json_ok(encode_bootstrap(data))
-    Error(error) -> app_error(error)
+  case request_schedule(request) {
+    Ok(#(view, anchor, schedule_start)) ->
+      case store.bootstrap(view, anchor, schedule_start) {
+        Ok(data) -> json_ok(encode_bootstrap(data))
+        Error(error) -> app_error(error)
+      }
+    Error(message) -> wisp.bad_request(message)
   }
 }
 
 fn handle_schedule(request: wisp.Request) -> wisp.Response {
-  let #(view, anchor) = request_view(request)
-  case store.schedule_view(view, anchor) {
-    Ok(schedule) -> json_ok(encode_schedule(schedule))
-    Error(error) -> app_error(error)
+  case request_schedule(request) {
+    Ok(#(view, anchor, schedule_start)) ->
+      case store.schedule_view(view, anchor, schedule_start) {
+        Ok(schedule) -> json_ok(encode_schedule(schedule))
+        Error(error) -> app_error(error)
+      }
+    Error(message) -> wisp.bad_request(message)
   }
 }
 
 fn patch_settings(body: Dynamic) -> wisp.Response {
   case decode.run(body, settings_decoder()) {
     Ok(model.SettingsPatch(include_weekends: None, deadline_slack_days: None)) ->
-      wisp.bad_request("Settings patch must include at least one updatable field")
+      wisp.bad_request(
+        "Settings patch must include at least one updatable field",
+      )
     Ok(settings) ->
       case store.set_settings(settings) {
         Ok(_) -> json_ok(success_json())
@@ -106,7 +116,13 @@ fn create_course(body: Dynamic) -> wisp.Response {
 
 fn update_course(course_id: String, body: Dynamic) -> wisp.Response {
   case parse_id(course_id), decode.run(body, update_course_decoder()) {
-    Ok(_), Ok(model.UpdateCourseInput(name: None, deadline: None, prerequisites: None)) ->
+    Ok(_),
+      Ok(model.UpdateCourseInput(
+        name: None,
+        deadline: None,
+        prerequisites: None,
+      ))
+    ->
       wisp.bad_request("Course patch must include at least one updatable field")
     Ok(course_id), Ok(input) ->
       case store.update_course(course_id, input) {
@@ -178,7 +194,9 @@ fn delete_module(module_id: String) -> wisp.Response {
   }
 }
 
-fn request_view(request: wisp.Request) -> #(String, calendar.Date) {
+fn request_schedule(
+  request: wisp.Request,
+) -> Result(#(String, calendar.Date, Option(calendar.Date)), String) {
   let query = wisp.get_query(request)
   let view = case list.key_find(query, "view") {
     Ok("month") -> "month"
@@ -188,7 +206,26 @@ fn request_view(request: wisp.Request) -> #(String, calendar.Date) {
     Ok(value) -> date.parse_iso(value) |> result.unwrap(date.today())
     Error(_) -> date.today()
   }
-  #(view, anchor)
+  case optional_date_query(query, "start", "Start date") {
+    Ok(schedule_start) -> Ok(#(view, anchor, schedule_start))
+    Error(message) -> Error(message)
+  }
+}
+
+fn optional_date_query(
+  query: List(#(String, String)),
+  key: String,
+  label: String,
+) -> Result(Option(calendar.Date), String) {
+  case list.key_find(query, key) {
+    Ok("") -> Ok(None)
+    Ok(value) ->
+      case date.parse_iso(value) {
+        Ok(parsed) -> Ok(Some(parsed))
+        Error(_) -> Error(label <> " must be a YYYY-MM-DD date")
+      }
+    Error(_) -> Ok(None)
+  }
 }
 
 fn settings_decoder() -> decode.Decoder(model.SettingsPatch) {
@@ -233,63 +270,63 @@ fn new_course_decoder() -> decode.Decoder(model.NewCourseInput) {
     )
     let course_modules = case module_range, modules {
       Some(range), [] -> Ok(model.GeneratedRange(range))
-      None, [_, .._] -> Ok(model.ExplicitModules(modules))
-      Some(_), [_, .._] ->
-        Error(
-          model.NewCourseInput(
-            vendor_id: 0,
-            name: "",
-            deadline: date.today(),
-            prerequisites: [],
-            modules: model.ExplicitModules([]),
-          ),
-        )
-      None, [] ->
-        Error(
-          model.NewCourseInput(
-            vendor_id: 0,
-            name: "",
-            deadline: date.today(),
-            prerequisites: [],
-            modules: model.ExplicitModules([]),
-          ),
-        )
-    }
-    case date.parse_iso(deadline_text) {
-      Ok(deadline) ->
-        case course_modules {
-          Ok(course_modules) ->
-            decode.success(
-              model.NewCourseInput(
-                vendor_id: vendor_id,
-                name: name,
-                deadline: deadline,
-                prerequisites: prerequisites,
-                modules: course_modules,
-              ),
-            )
-          Error(placeholder) -> decode.failure(
-            placeholder,
-            expected: "modules array or module_range object",
-          )
-        }
-      Error(_) -> decode.failure(
-        model.NewCourseInput(
+      None, [_, ..] -> Ok(model.ExplicitModules(modules))
+      Some(_), [_, ..] ->
+        Error(model.NewCourseInput(
           vendor_id: 0,
           name: "",
           deadline: date.today(),
           prerequisites: [],
           modules: model.ExplicitModules([]),
-        ),
-        expected: "YYYY-MM-DD date",
-      )
+        ))
+      None, [] ->
+        Error(model.NewCourseInput(
+          vendor_id: 0,
+          name: "",
+          deadline: date.today(),
+          prerequisites: [],
+          modules: model.ExplicitModules([]),
+        ))
+    }
+    case date.parse_iso(deadline_text) {
+      Ok(deadline) ->
+        case course_modules {
+          Ok(course_modules) ->
+            decode.success(model.NewCourseInput(
+              vendor_id: vendor_id,
+              name: name,
+              deadline: deadline,
+              prerequisites: prerequisites,
+              modules: course_modules,
+            ))
+          Error(placeholder) ->
+            decode.failure(
+              placeholder,
+              expected: "modules array or module_range object",
+            )
+        }
+      Error(_) ->
+        decode.failure(
+          model.NewCourseInput(
+            vendor_id: 0,
+            name: "",
+            deadline: date.today(),
+            prerequisites: [],
+            modules: model.ExplicitModules([]),
+          ),
+          expected: "YYYY-MM-DD date",
+        )
     }
   }
 }
 
 fn update_course_decoder() -> decode.Decoder(model.UpdateCourseInput) {
   {
-    use name <- decode.optional_field("name", None, decode.optional(decode.string))
+    use name <- decode.optional_field(
+      "name",
+      None,
+      decode.optional(decode.string),
+    )
     use deadline_text <- decode.optional_field(
       "deadline_date",
       None,
@@ -304,30 +341,27 @@ fn update_course_decoder() -> decode.Decoder(model.UpdateCourseInput) {
       Some(deadline_text) ->
         case date.parse_iso(deadline_text) {
           Ok(deadline) ->
-            decode.success(
+            decode.success(model.UpdateCourseInput(
+              name: name,
+              deadline: Some(deadline),
+              prerequisites: prerequisites,
+            ))
+          Error(_) ->
+            decode.failure(
               model.UpdateCourseInput(
-                name: name,
-                deadline: Some(deadline),
-                prerequisites: prerequisites,
+                name: None,
+                deadline: None,
+                prerequisites: None,
               ),
+              expected: "YYYY-MM-DD date",
             )
-          Error(_) -> decode.failure(
-            model.UpdateCourseInput(
-              name: None,
-              deadline: None,
-              prerequisites: None,
-            ),
-            expected: "YYYY-MM-DD date",
-          )
         }
       None ->
-        decode.success(
-          model.UpdateCourseInput(
-            name: name,
-            deadline: None,
-            prerequisites: prerequisites,
-          ),
-        )
+        decode.success(model.UpdateCourseInput(
+          name: name,
+          deadline: None,
+          prerequisites: prerequisites,
+        ))
     }
   }
 }
@@ -341,15 +375,25 @@ fn module_range_decoder() -> decode.Decoder(model.ModuleRange) {
   }
 }
 
-fn module_patch_decoder() -> decode.Decoder(#(Option(String), Option(Bool), Option(Int))) {
+fn module_patch_decoder() -> decode.Decoder(
+  #(Option(String), Option(Bool), Option(Int)),
+) {
   {
-    use name <- decode.optional_field("name", None, decode.optional(decode.string))
+    use name <- decode.optional_field(
+      "name",
+      None,
+      decode.optional(decode.string),
+    )
     use completed <- decode.optional_field(
       "completed",
       None,
       decode.optional(decode.bool),
     )
-    use position <- decode.optional_field("position", None, decode.optional(decode.int))
+    use position <- decode.optional_field(
+      "position",
+      None,
+      decode.optional(decode.int),
+    )
     decode.success(#(name, completed, position))
   }
 }
@@ -399,6 +443,7 @@ fn success_json() -> json.Json {
 fn encode_bootstrap(data: model.BootstrapData) -> json.Json {
   json.object([
     #("today", json.string(date.to_iso(data.today))),
+    #("schedule_start", json.string(date.to_iso(data.schedule_start))),
     #("settings", encode_settings(data.settings)),
     #("vendors", json.array(from: data.vendors, of: encode_vendor)),
     #("conflicts", json.array(from: data.conflicts, of: encode_conflict)),
@@ -429,7 +474,10 @@ fn encode_course(course: model.Course) -> json.Json {
     #("name", json.string(course.name)),
     #("deadline_date", json.string(date.to_iso(course.deadline))),
     #("prerequisites", json.array(from: course.prerequisites, of: json.string)),
-    #("module_range", json.nullable(from: course.module_range, of: encode_module_range)),
+    #(
+      "module_range",
+      json.nullable(from: course.module_range, of: encode_module_range),
+    ),
     #("modules", json.array(from: course.modules, of: encode_module)),
   ])
 }
@@ -451,10 +499,9 @@ fn encode_module(module: model.Module) -> json.Json {
     #("completed_at", json.nullable(from: module.completed_at, of: json.string)),
     #(
       "scheduled_date",
-      json.nullable(
-        from: module.scheduled_date,
-        of: fn(value) { json.string(date.to_iso(value)) },
-      )
+      json.nullable(from: module.scheduled_date, of: fn(value) {
+        json.string(date.to_iso(value))
+      }),
     ),
     #("slot_index", json.nullable(from: module.slot_index, of: json.int)),
   ])
@@ -752,7 +799,7 @@ fn index_html() -> String {
       >
 
         <!-- Calendar toolbar -->
-        <div class=\"flex items-center gap-4 mb-4 shrink-0\">
+        <div class=\"flex flex-wrap items-center gap-4 mb-4 shrink-0\">
           <div class=\"flex border-3 border-ink\">
             <button
               class=\"px-4 py-1.5 font-heading font-bold text-sm cursor-pointer transition-[background-color,color] duration-100\"
@@ -774,6 +821,20 @@ fn index_html() -> String {
             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"9 18 15 12 9 6\"/></svg>
           </button>
           <button class=\"btn btn-yellow text-sm\" @click=\"goToday()\">Today</button>
+          <div class=\"flex items-center gap-3 ml-2\">
+            <label class=\"text-sm font-heading font-bold\">Start</label>
+            <input
+              type=\"date\"
+              class=\"input-brutal w-56 text-sm tabular-nums\"
+              :value=\"$store.app.scheduleStartValue()\"
+              @change=\"setScheduleStart($event.target.value)\"
+            >
+            <button
+              class=\"btn text-sm\"
+              @click=\"resetScheduleStart()\"
+              :disabled=\"!$store.app.isSimulatingStart()\"
+            >Reset</button>
+          </div>
         </div>
 
         <!-- Calendar content (fades via _fading) -->
@@ -783,8 +844,8 @@ fn index_html() -> String {
           <template x-if=\"$store.app.view === 'week'\">
             <div class=\"grid grid-cols-7 border-3 border-ink\" style=\"min-height: calc(40vh - 40px)\">
               <template x-for=\"(day, i) in schedule?.days || []\" :key=\"day.date\">
-                <div class=\"border-r-3 border-ink last:border-r-0 flex flex-col\" :class=\"isToday(day.date) ? 'bg-yellow/10' : 'bg-surface'\">
-                  <div class=\"px-3 py-2 border-b-3 border-ink text-center\" :class=\"isToday(day.date) ? 'bg-yellow' : 'bg-surface'\">
+                <div class=\"border-r-3 border-ink last:border-r-0 flex flex-col\" :class=\"isScheduleStart(day.date) ? 'bg-yellow/10' : 'bg-surface'\">
+                  <div class=\"px-3 py-2 border-b-3 border-ink text-center\" :class=\"isScheduleStart(day.date) ? 'bg-yellow' : 'bg-surface'\">
                     <div class=\"font-heading font-bold text-sm uppercase\" x-text=\"dayLabel(day.date)\"></div>
                     <div class=\"font-heading font-bold text-2xl tabular-nums\" x-text=\"dayNum(day.date)\"></div>
                   </div>
@@ -823,7 +884,7 @@ fn index_html() -> String {
                 <div class=\"px-3 py-2 bg-ink text-surface text-center font-heading font-bold text-xs uppercase border-r border-ink/20 last:border-r-0\" x-text=\"label\"></div>
               </template>
               <template x-for=\"(day, i) in schedule?.days || []\" :key=\"day.date\">
-                <div class=\"border-t-3 border-ink flex flex-col overflow-hidden\" :class=\"[isToday(day.date) ? 'bg-yellow/10' : 'bg-surface', (i + 1) % 7 !== 0 ? 'border-r-3' : '']\">
+                <div class=\"border-t-3 border-ink flex flex-col overflow-hidden\" :class=\"[isScheduleStart(day.date) ? 'bg-yellow/10' : 'bg-surface', (i + 1) % 7 !== 0 ? 'border-r-3' : '']\">
                   <div :class=\"isCurrentMonth(day.date) ? '' : 'opacity-40'\">
                     <div class=\"px-2 py-1 text-right\">
                       <span class=\"text-sm font-heading font-bold tabular-nums\" x-text=\"dayNum(day.date)\"></span>

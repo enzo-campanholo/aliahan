@@ -83,38 +83,76 @@ pub fn initialise() -> Result(Nil, AppError) {
 pub fn bootstrap(
   view: String,
   anchor: calendar.Date,
+  schedule_start: Option(calendar.Date),
 ) -> Result(BootstrapData, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(prepare_schema(connection))
-    use #(conflicts, schedule_entries) <- result.try(transactional(
-      connection,
-      ensure_schedule_in_transaction,
-    ))
-    use settings <- result.try(load_settings(connection))
-    use vendors <- result.try(load_vendors(connection))
     let today = date.today()
-    let schedule = build_schedule_view(schedule_entries, view, anchor)
-    Ok(BootstrapData(
-      today: today,
-      settings: settings,
-      vendors: vendors,
-      conflicts: conflicts,
-      schedule: schedule,
-    ))
+    case schedule_start {
+      Some(schedule_start) -> {
+        use settings <- result.try(load_settings(connection))
+        use courses <- result.try(load_courses(connection))
+        use #(stored_entries, conflicts, schedule_entries) <- result.try(
+          scheduler.rebuild(courses, settings, schedule_start),
+        )
+        use vendors <- result.try(load_vendors(connection))
+        let schedule = build_schedule_view(schedule_entries, view, anchor)
+        Ok(BootstrapData(
+          today: today,
+          schedule_start: schedule_start,
+          settings: settings,
+          vendors: decorate_vendors_with_schedule(vendors, stored_entries),
+          conflicts: conflicts,
+          schedule: schedule,
+        ))
+      }
+      None -> {
+        use #(conflicts, schedule_entries) <- result.try(transactional(
+          connection,
+          ensure_schedule_in_transaction,
+        ))
+        use settings <- result.try(load_settings(connection))
+        use vendors <- result.try(load_vendors(connection))
+        let schedule = build_schedule_view(schedule_entries, view, anchor)
+        Ok(BootstrapData(
+          today: today,
+          schedule_start: today,
+          settings: settings,
+          vendors: vendors,
+          conflicts: conflicts,
+          schedule: schedule,
+        ))
+      }
+    }
   })
 }
 
 pub fn schedule_view(
   view: String,
   anchor: calendar.Date,
+  schedule_start: Option(calendar.Date),
 ) -> Result(ScheduleView, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(prepare_schema(connection))
-    use #(_, schedule_entries) <- result.try(transactional(
-      connection,
-      ensure_schedule_in_transaction,
-    ))
-    Ok(build_schedule_view(schedule_entries, view, anchor))
+    case schedule_start {
+      Some(schedule_start) -> {
+        use settings <- result.try(load_settings(connection))
+        use courses <- result.try(load_courses(connection))
+        use #(_, _, schedule_entries) <- result.try(scheduler.rebuild(
+          courses,
+          settings,
+          schedule_start,
+        ))
+        Ok(build_schedule_view(schedule_entries, view, anchor))
+      }
+      None -> {
+        use #(_, schedule_entries) <- result.try(transactional(
+          connection,
+          ensure_schedule_in_transaction,
+        ))
+        Ok(build_schedule_view(schedule_entries, view, anchor))
+      }
+    }
   })
 }
 
@@ -306,7 +344,10 @@ pub fn rename_module(module_id: Int, name: String) -> Result(Nil, AppError) {
   update_module(module_id, Some(name), None, None)
 }
 
-pub fn set_module_completed(module_id: Int, done: Bool) -> Result(Nil, AppError) {
+pub fn set_module_completed(
+  module_id: Int,
+  done: Bool,
+) -> Result(Nil, AppError) {
   update_module(module_id, None, Some(done), None)
 }
 
@@ -894,6 +935,70 @@ fn load_courses(
   )
 }
 
+fn decorate_vendors_with_schedule(
+  vendors: List(Vendor),
+  stored_entries: List(scheduler.StoredEntry),
+) -> List(Vendor) {
+  let entries_by_module =
+    stored_entries
+    |> list.fold(dict.new(), fn(acc, entry) {
+      dict.insert(acc, entry.module_id, entry)
+    })
+
+  vendors
+  |> list.map(fn(vendor) {
+    Vendor(
+      id: vendor.id,
+      name: vendor.name,
+      courses: vendor.courses
+        |> list.map(fn(course) {
+          Course(
+            id: course.id,
+            vendor_id: course.vendor_id,
+            vendor_name: course.vendor_name,
+            name: course.name,
+            deadline: course.deadline,
+            prerequisites: course.prerequisites,
+            prerequisite_ids: course.prerequisite_ids,
+            module_range: course.module_range,
+            modules: course.modules
+              |> list.map(fn(module) {
+                decorate_module_with_schedule(module, entries_by_module)
+              }),
+          )
+        }),
+    )
+  })
+}
+
+fn decorate_module_with_schedule(
+  module: Module,
+  entries_by_module: dict.Dict(Int, scheduler.StoredEntry),
+) -> Module {
+  case dict.get(entries_by_module, module.id) {
+    Ok(entry) ->
+      Module(
+        id: module.id,
+        course_id: module.course_id,
+        position: module.position,
+        name: module.name,
+        completed_at: module.completed_at,
+        scheduled_date: Some(entry.scheduled_date),
+        slot_index: Some(entry.slot_index),
+      )
+    Error(_) ->
+      Module(
+        id: module.id,
+        course_id: module.course_id,
+        position: module.position,
+        name: module.name,
+        completed_at: module.completed_at,
+        scheduled_date: None,
+        slot_index: None,
+      )
+  }
+}
+
 fn load_schedule_entries(
   connection: sqlight.Connection,
 ) -> Result(List(ScheduleEntry), AppError) {
@@ -1364,7 +1469,10 @@ fn module_range_from_row(
   }
 }
 
-fn option_then(value: Option(a), fun: fn(a) -> Result(b, AppError)) -> Option(b) {
+fn option_then(
+  value: Option(a),
+  fun: fn(a) -> Result(b, AppError),
+) -> Option(b) {
   case value {
     Some(value) ->
       case fun(value) {

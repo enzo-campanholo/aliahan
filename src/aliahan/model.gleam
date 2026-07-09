@@ -126,6 +126,7 @@ pub type ScheduleView {
 pub type BootstrapData {
   BootstrapData(
     today: calendar.Date,
+    schedule_start: calendar.Date,
     settings: Settings,
     vendors: List(Vendor),
     conflicts: List(Conflict),

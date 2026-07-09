@@ -119,9 +119,10 @@ pub fn index_html_scopes_add_course_to_vendor_test() {
   assert string.contains(body, "No vendors yet")
   assert string.contains(body, "@click.outside=\"close()\"") == False
   assert string.contains(
-    body,
-    "class=\"btn text-sm mx-auto\" disabled>+ Add Course</button>",
-  ) == False
+      body,
+      "class=\"btn text-sm mx-auto\" disabled>+ Add Course</button>",
+    )
+    == False
 }
 
 pub fn index_html_passes_event_to_module_toggle_test() {
@@ -130,6 +131,21 @@ pub fn index_html_passes_event_to_module_toggle_test() {
 
   let body = simulate.read_body(response)
   assert string.contains(body, "@change=\"toggleModule(mod, $event)\"")
+}
+
+pub fn index_html_exposes_schedule_start_simulation_controls_test() {
+  let response = web.handle(simulate.request(http.Get, "/"), "priv")
+  assert response.status == 200
+
+  let body = simulate.read_body(response)
+  assert string.contains(body, ":value=\"$store.app.scheduleStartValue()\"")
+  assert string.contains(
+    body,
+    "@change=\"setScheduleStart($event.target.value)\"",
+  )
+  assert string.contains(body, "@click=\"resetScheduleStart()\"")
+  assert string.contains(body, ":disabled=\"!$store.app.isSimulatingStart()\"")
+  assert string.contains(body, "isScheduleStart(day.date)")
 }
 
 pub fn app_js_shares_vendor_color_revision_across_views_test() {
@@ -200,7 +216,10 @@ pub fn app_js_course_modal_requires_valid_modules_test() {
   assert string.contains(body, "get explicitModules()")
   assert string.contains(body, "get rangeIsValid()")
   assert string.contains(body, "get canSubmit()")
-  assert string.contains(body, "return this.form.mode === \"range\" ? this.rangeIsValid : this.explicitModules.length > 0;")
+  assert string.contains(
+    body,
+    "return this.form.mode === \"range\" ? this.rangeIsValid : this.explicitModules.length > 0;",
+  )
   assert string.contains(body, "if (!this.canSubmit) return;")
   assert string.contains(body, "payload.modules = this.explicitModules;")
 }
@@ -329,11 +348,24 @@ pub fn app_js_optimistically_updates_calendar_targets_before_bootstrap_test() {
     body,
     "today() {\n      return this.data?.today || todayIso();\n    },",
   )
+  assert string.contains(body, "scheduleStart: null")
+  assert string.contains(
+    body,
+    "scheduleStartValue() {\n      return this.scheduleStart || this.data?.schedule_start || this.today();\n    },",
+  )
   assert string.contains(body, "_bootstrapRequestId: 0")
   assert string.contains(body, "const requestId = ++this._bootstrapRequestId;")
   assert string.contains(
     body,
-    "const targetAnchor = anchor || todayIso();\n      this.error = \"\";\n      this.view = view;\n      this.anchor = targetAnchor;",
+    "const targetStart = scheduleStart || null;\n      const targetAnchor = anchor || targetStart || todayIso();",
+  )
+  assert string.contains(
+    body,
+    "if (targetStart) params.set(\"start\", targetStart);",
+  )
+  assert string.contains(
+    body,
+    "this.scheduleStart = targetStart ? data.schedule_start : null;",
   )
   assert string.contains(
     body,
@@ -345,7 +377,7 @@ pub fn app_js_optimistically_updates_calendar_targets_before_bootstrap_test() {
   )
   assert string.contains(
     body,
-    "return dateStr === Alpine.store(\"app\").today();",
+    "return dateStr === Alpine.store(\"app\").scheduleStartValue();",
   )
   assert string.contains(body, "anchor: app.today(),")
   assert string.contains(body, "deadline_date: Alpine.store(\"app\").today(),")
@@ -435,6 +467,103 @@ pub fn scheduler_overlaps_when_deadline_requires_it_test() {
 
   assert conflicts == []
   assert list.any(entries, fn(entry) { entry.slot_index > 0 })
+}
+
+pub fn scheduler_spreads_required_overlaps_across_available_days_test() {
+  let today = calendar.Date(2026, calendar.March, 19)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 2)
+
+  let packed =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Packed",
+      deadline: calendar.Date(2026, calendar.March, 23),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "P1"),
+        module(id: 12, course_id: 1, position: 2, name: "P2"),
+        module(id: 13, course_id: 1, position: 3, name: "P3"),
+        module(id: 14, course_id: 1, position: 4, name: "P4"),
+        module(id: 15, course_id: 1, position: 5, name: "P5"),
+        module(id: 16, course_id: 1, position: 6, name: "P6"),
+        module(id: 17, course_id: 1, position: 7, name: "P7"),
+        module(id: 18, course_id: 1, position: 8, name: "P8"),
+      ],
+    )
+
+  let assert Ok(#(_, conflicts, entries)) =
+    scheduler.rebuild([packed], settings, today)
+
+  assert conflicts == []
+  let scheduled_dates = entries |> list.map(fn(entry) { entry.scheduled_date })
+  assert scheduled_dates
+    == [
+      today,
+      today,
+      date.day_after(today),
+      date.day_after(today),
+      date.add_days(today, 2),
+      date.add_days(today, 2),
+      date.add_days(today, 3),
+      date.add_days(today, 4),
+    ]
+}
+
+pub fn scheduler_keeps_later_courses_spread_when_all_days_are_occupied_test() {
+  let today = calendar.Date(2026, calendar.March, 19)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 0)
+
+  let dense =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Dense",
+      deadline: calendar.Date(2026, calendar.March, 23),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "D1"),
+        module(id: 12, course_id: 1, position: 2, name: "D2"),
+        module(id: 13, course_id: 1, position: 3, name: "D3"),
+        module(id: 14, course_id: 1, position: 4, name: "D4"),
+        module(id: 15, course_id: 1, position: 5, name: "D5"),
+        module(id: 16, course_id: 1, position: 6, name: "D6"),
+        module(id: 17, course_id: 1, position: 7, name: "D7"),
+        module(id: 18, course_id: 1, position: 8, name: "D8"),
+      ],
+    )
+
+  let light =
+    course(
+      id: 2,
+      vendor_name: "Vendor",
+      name: "Light",
+      deadline: calendar.Date(2026, calendar.March, 23),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 21, course_id: 2, position: 1, name: "L1"),
+        module(id: 22, course_id: 2, position: 2, name: "L2"),
+        module(id: 23, course_id: 2, position: 3, name: "L3"),
+      ],
+    )
+
+  let assert Ok(#(_, conflicts, entries)) =
+    scheduler.rebuild([dense, light], settings, today)
+
+  assert conflicts == []
+  let light_dates =
+    entries
+    |> list.filter(fn(entry) { entry.course_name == "Light" })
+    |> list.map(fn(entry) { entry.scheduled_date })
+  assert light_dates
+    == [
+      today,
+      date.add_days(today, 2),
+      date.add_days(today, 4),
+    ]
 }
 
 pub fn scheduler_spaces_course_across_its_window_test() {
@@ -817,6 +946,117 @@ pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
     let rebuilt = bootstrap_for(today)
     assert schedule_module_names_on(rebuilt, today) == ["Tomorrow"]
     assert schedule_module_names_on(rebuilt, tomorrow) == []
+  })
+}
+
+pub fn bootstrap_can_preview_schedule_from_custom_start_without_persisting_test() {
+  with_isolated_store(
+    "bootstrap_can_preview_schedule_from_custom_start_without_persisting",
+    fn(_, _) {
+      let today = date.today()
+      let simulated_start = date.day_after(today)
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Preview",
+          deadline: date.add_days(today, 5),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Only"]),
+        ))
+
+      let persisted_before = course_named("Vendor", "Preview")
+      let assert [persisted_module_before] = persisted_before.modules
+      assert persisted_module_before.scheduled_date == Some(today)
+
+      let assert Ok(preview) =
+        store.bootstrap("week", simulated_start, Some(simulated_start))
+      assert preview.today == today
+      assert preview.schedule_start == simulated_start
+      let assert Ok(preview_vendor) =
+        list.find(preview.vendors, fn(vendor) { vendor.name == "Vendor" })
+      let assert Ok(preview_course) =
+        list.find(preview_vendor.courses, fn(course) {
+          course.name == "Preview"
+        })
+      let assert [preview_module] = preview_course.modules
+      assert preview_module.scheduled_date == Some(simulated_start)
+      assert schedule_module_names_on(preview, simulated_start) == ["Only"]
+
+      let persisted_after = course_named("Vendor", "Preview")
+      let assert [persisted_module_after] = persisted_after.modules
+      assert persisted_module_after.scheduled_date == Some(today)
+    },
+  )
+}
+
+pub fn bootstrap_start_query_returns_preview_schedule_test() {
+  with_isolated_store(
+    "bootstrap_start_query_returns_preview_schedule",
+    fn(_, _) {
+      let today = date.today()
+      let simulated_start = date.day_after(today)
+      let start_iso = date.to_iso(simulated_start)
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Preview",
+          deadline: date.add_days(today, 5),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Only"]),
+        ))
+
+      let response =
+        web.handle(
+          simulate.request(
+            http.Get,
+            "/api/bootstrap?view=week&anchor="
+              <> start_iso
+              <> "&start="
+              <> start_iso,
+          ),
+          "priv",
+        )
+
+      assert response.status == 200
+      let body = simulate.read_body(response)
+      assert string.contains(body, "\"schedule_start\":\"" <> start_iso <> "\"")
+      assert string.contains(body, "\"scheduled_date\":\"" <> start_iso <> "\"")
+    },
+  )
+}
+
+pub fn bootstrap_start_query_rejects_invalid_dates_test() {
+  with_isolated_store("bootstrap_start_query_rejects_invalid_dates", fn(_, _) {
+    let assert Ok(Nil) = store.initialise()
+    let response =
+      web.handle(
+        simulate.request(http.Get, "/api/bootstrap?start=not-a-date"),
+        "priv",
+      )
+
+    assert response.status == 400
+    assert string.contains(
+      simulate.read_body(response),
+      "Start date must be a YYYY-MM-DD date",
+    )
   })
 }
 
@@ -1396,12 +1636,12 @@ fn seed_course(
 
 fn bootstrap_data() -> model.BootstrapData {
   let assert Ok(data) =
-    store.bootstrap("week", calendar.Date(2026, calendar.March, 19))
+    store.bootstrap("week", calendar.Date(2026, calendar.March, 19), None)
   data
 }
 
 fn bootstrap_for(anchor: calendar.Date) -> model.BootstrapData {
-  let assert Ok(data) = store.bootstrap("week", anchor)
+  let assert Ok(data) = store.bootstrap("week", anchor, None)
   data
 }
 

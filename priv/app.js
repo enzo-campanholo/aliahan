@@ -123,6 +123,7 @@ document.addEventListener("alpine:init", () => {
     data: null,
     view: "week",
     anchor: null,
+    scheduleStart: null,
     loading: false,
     error: "",
     _bootstrapRequestId: 0,
@@ -132,12 +133,28 @@ document.addEventListener("alpine:init", () => {
       return this.data?.today || todayIso();
     },
 
-    async loadBootstrap({ showLoading = false, view = this.view, anchor = this.anchor || todayIso() } = {}) {
+    scheduleStartValue() {
+      return this.scheduleStart || this.data?.schedule_start || this.today();
+    },
+
+    isSimulatingStart() {
+      return !!this.scheduleStart;
+    },
+
+    async loadBootstrap({
+      showLoading = false,
+      view = this.view,
+      anchor = this.anchor || this.scheduleStartValue(),
+      scheduleStart = this.scheduleStart,
+    } = {}) {
       const requestId = ++this._bootstrapRequestId;
-      const targetAnchor = anchor || todayIso();
+      const previousScheduleStart = this.scheduleStart;
+      const targetStart = scheduleStart || null;
+      const targetAnchor = anchor || targetStart || todayIso();
       this.error = "";
       this.view = view;
       this.anchor = targetAnchor;
+      this.scheduleStart = targetStart;
       if (showLoading) {
         this.loading = true;
         this._loadingRequestId = requestId;
@@ -147,15 +164,18 @@ document.addEventListener("alpine:init", () => {
           view,
           anchor: targetAnchor,
         });
+        if (targetStart) params.set("start", targetStart);
         const data = await api(`/api/bootstrap?${params}`);
         if (requestId !== this._bootstrapRequestId) return true;
         this.data = data;
         this.view = data.schedule.view;
         this.anchor = data.schedule.anchor;
+        this.scheduleStart = targetStart ? data.schedule_start : null;
         this.error = "";
         return true;
       } catch (e) {
         if (requestId !== this._bootstrapRequestId) return true;
+        this.scheduleStart = previousScheduleStart;
         const schedule = this.data?.schedule;
         if (schedule) {
           this.view = schedule.view;
@@ -176,14 +196,31 @@ document.addEventListener("alpine:init", () => {
       return await this.loadBootstrap({
         showLoading: true,
         view: this.view,
-        anchor: this.anchor || todayIso(),
+        anchor: this.anchor || this.scheduleStartValue(),
       });
     },
 
     async refresh() {
       return await this.loadBootstrap({
         view: this.view,
-        anchor: this.anchor || todayIso(),
+        anchor: this.anchor || this.scheduleStartValue(),
+      });
+    },
+
+    async setScheduleStart(value) {
+      if (!value) return false;
+      return await this.loadBootstrap({
+        view: this.view,
+        anchor: value,
+        scheduleStart: value,
+      });
+    },
+
+    async resetScheduleStart() {
+      return await this.loadBootstrap({
+        view: this.view,
+        anchor: this.today(),
+        scheduleStart: null,
       });
     },
 
@@ -274,6 +311,10 @@ document.addEventListener("alpine:init", () => {
       return dateStr === Alpine.store("app").today();
     },
 
+    isScheduleStart(dateStr) {
+      return dateStr === Alpine.store("app").scheduleStartValue();
+    },
+
     isCurrentMonth(dateStr) {
       const anchor = this.schedule?.anchor;
       if (!anchor) return true;
@@ -300,7 +341,7 @@ document.addEventListener("alpine:init", () => {
         const app = Alpine.store("app");
         await app.loadBootstrap({
           view,
-          anchor: app.anchor || todayIso(),
+          anchor: app.anchor || app.scheduleStartValue(),
         });
       });
     },
@@ -335,6 +376,21 @@ document.addEventListener("alpine:init", () => {
           view: app.view,
           anchor: app.today(),
         });
+      });
+    },
+
+    setScheduleStart(value) {
+      if (!value) return;
+      this.resetPopover();
+      this._withFade(async () => {
+        await Alpine.store("app").setScheduleStart(value);
+      });
+    },
+
+    resetScheduleStart() {
+      this.resetPopover();
+      this._withFade(async () => {
+        await Alpine.store("app").resetScheduleStart();
       });
     },
 

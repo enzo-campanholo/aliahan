@@ -1,5 +1,5 @@
 import aliahan/date
-import aliahan/model as model
+import aliahan/model
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -109,11 +109,9 @@ pub fn rebuild(
   case validate_no_cycles(courses) {
     Error(error) -> Error(error)
     Ok(_) -> {
-      use effective_deadlines <- result.try(
-        compute_effective_deadlines(
-          courses |> list.filter(fn(course) { remaining_modules(course) != [] }),
-        ),
-      )
+      use effective_deadlines <- result.try(compute_effective_deadlines(
+        courses |> list.filter(fn(course) { remaining_modules(course) != [] }),
+      ))
 
       let completed_ids = completed_course_ids(courses)
       let active_courses =
@@ -152,7 +150,12 @@ pub fn rebuild(
         |> sort_stored_entries
         |> normalize_schedule(active_courses, settings, today)
       let schedule_entries =
-        build_schedule_entries(active_courses, settings, today, normalized_entries)
+        build_schedule_entries(
+          active_courses,
+          settings,
+          today,
+          normalized_entries,
+        )
 
       Ok(#(
         normalized_entries,
@@ -202,14 +205,10 @@ fn schedule_courses(
 
         [selected, ..remaining_candidates] -> {
           let #(next_occupancy, next_stored, next_schedule_entries, finish_date) =
-            place_course(
-              selected,
-              occupancy,
-              stored_entries,
-              schedule_entries,
-            )
+            place_course(selected, occupancy, stored_entries, schedule_entries)
 
-          let next_finished = dict.insert(finished_dates, selected.plan.course.id, finish_date)
+          let next_finished =
+            dict.insert(finished_dates, selected.plan.course.id, finish_date)
           let next_planned =
             remaining_candidates
             |> list.map(fn(candidate) { candidate.plan })
@@ -278,15 +277,19 @@ fn build_schedule_context(
     |> list.fold([], fn(acc, plan) {
       let scheduled_modules =
         plan.remaining
-        |> list.filter(fn(module) { list.contains(scheduled_module_ids, module.id) })
+        |> list.filter(fn(module) {
+          list.contains(scheduled_module_ids, module.id)
+        })
       case scheduled_modules {
         [] -> acc
         _ -> [
           CourseContext(
             course: plan.course,
             effective_deadline: plan.effective_deadline,
-            preferred_deadline:
-              preferred_deadline(plan.effective_deadline, settings.deadline_slack_days),
+            preferred_deadline: preferred_deadline(
+              plan.effective_deadline,
+              settings.deadline_slack_days,
+            ),
             module_ids: scheduled_modules |> list.map(fn(module) { module.id }),
           ),
           ..acc
@@ -305,7 +308,9 @@ fn build_schedule_context(
       course_context.module_ids
       |> list.fold(acc, fn(inner, module_id) {
         let assert Ok(module) =
-          list.find(course_context.course.modules, fn(module) { module.id == module_id })
+          list.find(course_context.course.modules, fn(module) {
+            module.id == module_id
+          })
         dict.insert(
           inner,
           module_id,
@@ -324,7 +329,9 @@ fn build_schedule_context(
     course_contexts: course_contexts,
     courses_by_id: courses_by_id,
     module_contexts_by_id: module_contexts_by_id,
-    dependents: build_dependents(course_contexts |> list.map(fn(context) { context.course })),
+    dependents: build_dependents(
+      course_contexts |> list.map(fn(context) { context.course }),
+    ),
     settings: settings,
     today: today,
   )
@@ -418,40 +425,39 @@ fn candidate_moves_for_gap(
     modules_on_day(placements, gap.left_date, context.module_contexts_by_id)
   let right_modules =
     modules_on_day(placements, gap.right_date, context.module_contexts_by_id)
-  let left_moves =
-    case
-      run_length_ending_at_date(active_dates, gap.left_date, context.settings) > 1
-      || list.length(left_modules) > 1
-    {
-      True ->
-        left_modules
-        |> list.fold([], fn(acc, module_id) {
-          let move = CandidateMove(module_id:, target_date: left_target)
-          case legal_move(context, placements, move) {
-            True -> [move, ..acc]
-            False -> acc
-          }
-        })
-        |> list.reverse
-      False -> []
-    }
-  let right_moves =
-    case
-      run_length_starting_at_date(active_dates, gap.right_date, context.settings) > 1
-      || list.length(right_modules) > 1
-    {
-      True ->
-        right_modules
-        |> list.fold([], fn(acc, module_id) {
-          let move = CandidateMove(module_id:, target_date: right_target)
-          case legal_move(context, placements, move) {
-            True -> [move, ..acc]
-            False -> acc
-          }
-        })
-        |> list.reverse
-      False -> []
-    }
+  let left_moves = case
+    run_length_ending_at_date(active_dates, gap.left_date, context.settings) > 1
+    || list.length(left_modules) > 1
+  {
+    True ->
+      left_modules
+      |> list.fold([], fn(acc, module_id) {
+        let move = CandidateMove(module_id:, target_date: left_target)
+        case legal_move(context, placements, move) {
+          True -> [move, ..acc]
+          False -> acc
+        }
+      })
+      |> list.reverse
+    False -> []
+  }
+  let right_moves = case
+    run_length_starting_at_date(active_dates, gap.right_date, context.settings)
+    > 1
+    || list.length(right_modules) > 1
+  {
+    True ->
+      right_modules
+      |> list.fold([], fn(acc, module_id) {
+        let move = CandidateMove(module_id:, target_date: right_target)
+        case legal_move(context, placements, move) {
+          True -> [move, ..acc]
+          False -> acc
+        }
+      })
+      |> list.reverse
+    False -> []
+  }
   list.append(left_moves, right_moves)
 }
 
@@ -470,15 +476,24 @@ fn legal_move(
       case
         should_skip_day(context.settings, move.target_date)
         || date.compare(move.target_date, context.today) == Lt
-        || date.compare(move.target_date, course_context.effective_deadline) == Gt
+        || date.compare(move.target_date, course_context.effective_deadline)
+        == Gt
       {
         True -> False
 
         False -> {
           let previous_date =
-            previous_module_date(course_context.module_ids, move.module_id, placements)
+            previous_module_date(
+              course_context.module_ids,
+              move.module_id,
+              placements,
+            )
           let next_date =
-            next_module_date(course_context.module_ids, move.module_id, placements)
+            next_module_date(
+              course_context.module_ids,
+              move.module_id,
+              placements,
+            )
           let earliest_start =
             earliest_start_from_placements(
               course_context.course.prerequisite_ids,
@@ -540,7 +555,7 @@ fn first_module_too_early(
   earliest_start: calendar.Date,
 ) -> Bool {
   case module_ids {
-    [first_id, .._] ->
+    [first_id, ..] ->
       case first_id == module_id {
         True -> date.compare(target_date, earliest_start) == Lt
         False -> False
@@ -560,7 +575,11 @@ fn dependents_still_start_after_finish(
   |> list.all(fn(dependent_id) {
     case dict.get(context.courses_by_id, dependent_id) {
       Ok(dependent_context) ->
-        date.compare(finish_date, course_start_date(dependent_context, placements)) == Lt
+        date.compare(
+          finish_date,
+          course_start_date(dependent_context, placements),
+        )
+        == Lt
       Error(_) -> True
     }
   })
@@ -580,11 +599,12 @@ fn earliest_start_from_placements(
         Error(_) -> acc
       }
     })
-  let earliest =
-    case date.compare(latest_finish, date.day_before(context.today)) {
-      Eq -> context.today
-      _ -> date.day_after(latest_finish)
-    }
+  let earliest = case
+    date.compare(latest_finish, date.day_before(context.today))
+  {
+    Eq -> context.today
+    _ -> date.day_after(latest_finish)
+  }
   next_allowed_day(earliest, context.settings)
 }
 
@@ -595,7 +615,11 @@ fn apply_move(
   placements
   |> list.map(fn(placement) {
     case placement.module_id == move.module_id {
-      True -> Placement(module_id: placement.module_id, scheduled_date: move.target_date)
+      True ->
+        Placement(
+          module_id: placement.module_id,
+          scheduled_date: move.target_date,
+        )
       False -> placement
     }
   })
@@ -612,10 +636,7 @@ fn schedule_score(
   )
 }
 
-fn idle_overflow(
-  context: ScheduleContext,
-  placements: List(Placement),
-) -> Int {
+fn idle_overflow(context: ScheduleContext, placements: List(Placement)) -> Int {
   oversized_gaps(context.settings, placements)
   |> list.fold(leading_idle_overflow(context, placements), fn(total, gap) {
     total + { gap.gap_size - max_idle_gap }
@@ -640,17 +661,20 @@ fn activity_penalty_from_dates(
     [] -> penalty + { current_run * current_run }
     [_day] -> penalty + { current_run + 1 } * { current_run + 1 }
     [left, right, ..rest] -> {
-      let next_run =
-        case idle_gap_size(left, right, settings) == 0 {
-          True -> current_run + 1
-          False -> 0
-        }
-      let next_penalty =
-        case idle_gap_size(left, right, settings) == 0 {
-          True -> penalty
-          False -> penalty + { current_run + 1 } * { current_run + 1 }
-        }
-      activity_penalty_from_dates([right, ..rest], settings, next_run, next_penalty)
+      let next_run = case idle_gap_size(left, right, settings) == 0 {
+        True -> current_run + 1
+        False -> 0
+      }
+      let next_penalty = case idle_gap_size(left, right, settings) == 0 {
+        True -> penalty
+        False -> penalty + { current_run + 1 } * { current_run + 1 }
+      }
+      activity_penalty_from_dates(
+        [right, ..rest],
+        settings,
+        next_run,
+        next_penalty,
+      )
     }
   }
 }
@@ -660,15 +684,14 @@ fn leading_idle_overflow(
   placements: List(Placement),
 ) -> Int {
   case unique_active_dates(placements) {
-    [first_active, .._] -> {
+    [first_active, ..] -> {
       let start = next_allowed_day(context.today, context.settings)
-      let size =
-        case date.compare(start, first_active) {
-          Lt ->
-            days_in_window(start, date.day_before(first_active), context.settings)
-            |> list.length
-          _ -> 0
-        }
+      let size = case date.compare(start, first_active) {
+        Lt ->
+          days_in_window(start, date.day_before(first_active), context.settings)
+          |> list.length
+        _ -> 0
+      }
       case size > max_idle_gap {
         True -> size - max_idle_gap
         False -> 0
@@ -696,15 +719,14 @@ fn run_length_ending_at_date_loop(
   case dates {
     [] -> 0
     [day, ..rest] -> {
-      let next_run =
-        case previous_date {
-          Some(previous_day) ->
-            case idle_gap_size(previous_day, day, settings) == 0 {
-              True -> current_run + 1
-              False -> 1
-            }
-          None -> 1
-        }
+      let next_run = case previous_date {
+        Some(previous_day) ->
+          case idle_gap_size(previous_day, day, settings) == 0 {
+            True -> current_run + 1
+            False -> 1
+          }
+        None -> 1
+      }
       case date.compare(day, target) {
         Eq -> next_run
         _ ->
@@ -732,7 +754,12 @@ fn run_length_starting_at_date(
         Eq ->
           case idle_gap_size(day, next_day, settings) == 0 {
             True ->
-              1 + run_length_starting_at_date([next_day, ..rest], next_day, settings)
+              1
+              + run_length_starting_at_date(
+                [next_day, ..rest],
+                next_day,
+                settings,
+              )
             False -> 1
           }
         _ -> run_length_starting_at_date([next_day, ..rest], target, settings)
@@ -785,11 +812,10 @@ fn gaps_from_dates(
       let size = idle_gap_size(left, right, settings)
       case size > max_idle_gap {
         True ->
-          gaps_from_dates(
-            settings,
-            [right, ..rest],
-            [Gap(left_date: left, right_date: right, gap_size: size), ..acc],
-          )
+          gaps_from_dates(settings, [right, ..rest], [
+            Gap(left_date: left, right_date: right, gap_size: size),
+            ..acc
+          ])
         False -> gaps_from_dates(settings, [right, ..rest], acc)
       }
     }
@@ -820,7 +846,7 @@ fn unique_sorted_dates(
   case dates, acc {
     [], _ -> list.reverse(acc)
     [date, ..rest], [] -> unique_sorted_dates(rest, [date])
-    [date, ..rest], [last, .._] ->
+    [date, ..rest], [last, ..] ->
       case date.compare(date, last) {
         Eq -> unique_sorted_dates(rest, acc)
         _ -> unique_sorted_dates(rest, [date, ..acc])
@@ -834,13 +860,11 @@ fn modules_on_day(
   module_contexts_by_id: dict.Dict(Int, ModuleContext),
 ) -> List(Int) {
   placements
-  |> list.filter(fn(placement) { date.compare(placement.scheduled_date, scheduled_date) == Eq })
+  |> list.filter(fn(placement) {
+    date.compare(placement.scheduled_date, scheduled_date) == Eq
+  })
   |> list.sort(fn(left, right) {
-    compare_module_order(
-      left.module_id,
-      right.module_id,
-      module_contexts_by_id,
-    )
+    compare_module_order(left.module_id, right.module_id, module_contexts_by_id)
   })
   |> list.map(fn(placement) { placement.module_id })
 }
@@ -851,7 +875,9 @@ fn day_is_idle(
 ) -> Bool {
   case
     placements
-    |> list.any(fn(placement) { date.compare(placement.scheduled_date, scheduled_date) == Eq })
+    |> list.any(fn(placement) {
+      date.compare(placement.scheduled_date, scheduled_date) == Eq
+    })
   {
     True -> False
     False -> True
@@ -916,7 +942,7 @@ fn next_module_date(
 ) -> Option(calendar.Date) {
   case module_ids {
     [] -> None
-    [current_id, next_id, .._] ->
+    [current_id, next_id, ..] ->
       case current_id == module_id {
         True -> Some(scheduled_date_for_module(placements, next_id))
         False ->
@@ -943,7 +969,7 @@ fn course_start_date(
   placements: List(Placement),
 ) -> calendar.Date {
   case course_context.module_ids {
-    [first_id, .._] -> scheduled_date_for_module(placements, first_id)
+    [first_id, ..] -> scheduled_date_for_module(placements, first_id)
     [] -> panic as "Scheduled course is missing modules"
   }
 }
@@ -1000,49 +1026,34 @@ fn assign_slots(
         Some(day) ->
           case date.compare(day, placement.scheduled_date) {
             Eq ->
-              assign_slots(
-                rest,
-                current_day,
-                next_slot_index + 1,
-                [
-                  StoredEntry(
-                    module_id: placement.module_id,
-                    scheduled_date: placement.scheduled_date,
-                    slot_index: next_slot_index,
-                  ),
-                  ..acc
-                ],
-              )
+              assign_slots(rest, current_day, next_slot_index + 1, [
+                StoredEntry(
+                  module_id: placement.module_id,
+                  scheduled_date: placement.scheduled_date,
+                  slot_index: next_slot_index,
+                ),
+                ..acc
+              ])
             _ ->
-              assign_slots(
-                rest,
-                Some(placement.scheduled_date),
-                1,
-                [
-                  StoredEntry(
-                    module_id: placement.module_id,
-                    scheduled_date: placement.scheduled_date,
-                    slot_index: 0,
-                  ),
-                  ..acc
-                ],
-              )
+              assign_slots(rest, Some(placement.scheduled_date), 1, [
+                StoredEntry(
+                  module_id: placement.module_id,
+                  scheduled_date: placement.scheduled_date,
+                  slot_index: 0,
+                ),
+                ..acc
+              ])
           }
 
         None ->
-          assign_slots(
-            rest,
-            Some(placement.scheduled_date),
-            1,
-            [
-              StoredEntry(
-                module_id: placement.module_id,
-                scheduled_date: placement.scheduled_date,
-                slot_index: 0,
-              ),
-              ..acc
-            ],
-          )
+          assign_slots(rest, Some(placement.scheduled_date), 1, [
+            StoredEntry(
+              module_id: placement.module_id,
+              scheduled_date: placement.scheduled_date,
+              slot_index: 0,
+            ),
+            ..acc
+          ])
       }
   }
 }
@@ -1091,13 +1102,20 @@ fn build_candidate(
       settings,
       today,
     )
-  let allowed_days = days_in_window(earliest_start, plan.effective_deadline, settings)
+  let allowed_days =
+    days_in_window(earliest_start, plan.effective_deadline, settings)
   let preferred_deadline =
     preferred_deadline(plan.effective_deadline, settings.deadline_slack_days)
   let preferred_day_count =
     days_in_window(earliest_start, preferred_deadline, settings) |> list.length
   let slack = preferred_day_count - list.length(plan.remaining)
-  CandidateCourse(plan:, earliest_start:, allowed_days:, preferred_day_count:, slack:)
+  CandidateCourse(
+    plan:,
+    earliest_start:,
+    allowed_days:,
+    preferred_day_count:,
+    slack:,
+  )
 }
 
 fn split_impossible(
@@ -1164,10 +1182,12 @@ fn place_modules(
     [] -> #(occupancy, stored_entries, schedule_entries, last_assigned_day)
 
     [module, ..rest] -> {
-      let target_day_count = effective_target_day_count(preferred_day_count, day_count)
+      let target_day_count =
+        effective_target_day_count(preferred_day_count, day_count, module_count)
       let target_index =
         target_day_index(module_index, module_count, target_day_count)
         |> max_int(min_index)
+      let overlaps_required = module_count > target_day_count
       let chosen_index =
         choose_day_index(
           allowed_days,
@@ -1175,6 +1195,7 @@ fn place_modules(
           preferred_day_count,
           target_index,
           min_index,
+          overlaps_required,
         )
       let assigned_day = date_for_index(allowed_days, chosen_index)
       let slot_index = slot_count(occupancy, assigned_day)
@@ -1219,31 +1240,96 @@ fn choose_day_index(
   preferred_day_count: Int,
   target_index: Int,
   min_index: Int,
+  overlaps_required: Bool,
 ) -> Int {
   let max_index = list.length(allowed_days) - 1
   let candidate_indices = index_range(min_index, max_index)
-  let free_indices =
-    candidate_indices
-    |> list.filter(fn(index) {
-      slot_count(occupancy, date_for_index(allowed_days, index)) == 0
-    })
 
-  case free_indices {
-    [first, ..rest] ->
-      choose_best_free_index(
-        rest,
-        first,
-        target_index,
-        preferred_day_count,
-      )
-    [] ->
-      choose_best_overlap_index(
+  case overlaps_required {
+    True ->
+      choose_best_balanced_index(
         candidate_indices,
         target_index,
-        preferred_day_count,
         allowed_days,
         occupancy,
       )
+
+    False -> {
+      let free_indices =
+        candidate_indices
+        |> list.filter(fn(index) {
+          slot_count(occupancy, date_for_index(allowed_days, index)) == 0
+        })
+
+      case free_indices {
+        [first, ..rest] ->
+          choose_best_free_index(rest, first, target_index, preferred_day_count)
+        [] ->
+          choose_best_overlap_index(
+            candidate_indices,
+            target_index,
+            preferred_day_count,
+            allowed_days,
+            occupancy,
+          )
+      }
+    }
+  }
+}
+
+fn choose_best_balanced_index(
+  indices: List(Int),
+  target_index: Int,
+  allowed_days: List(calendar.Date),
+  occupancy: dict.Dict(String, Int),
+) -> Int {
+  let assert [first, ..rest] = indices
+  choose_best_balanced_index_loop(
+    rest,
+    first,
+    target_index,
+    allowed_days,
+    occupancy,
+  )
+}
+
+fn choose_best_balanced_index_loop(
+  indices: List(Int),
+  best: Int,
+  target_index: Int,
+  allowed_days: List(calendar.Date),
+  occupancy: dict.Dict(String, Int),
+) -> Int {
+  case indices {
+    [] -> best
+    [index, ..rest] ->
+      case
+        better_balanced_index(
+          index,
+          best,
+          target_index,
+          allowed_days,
+          occupancy,
+        )
+      {
+        True ->
+          choose_best_balanced_index_loop(
+            rest,
+            index,
+            target_index,
+            allowed_days,
+            occupancy,
+          )
+
+        False ->
+          choose_best_balanced_index_loop(
+            rest,
+            best,
+            target_index,
+            allowed_days,
+            occupancy,
+          )
+      }
   }
 }
 
@@ -1257,8 +1343,10 @@ fn choose_best_free_index(
     [] -> best
     [index, ..rest] ->
       case better_free_index(index, best, target_index, preferred_day_count) {
-        True -> choose_best_free_index(rest, index, target_index, preferred_day_count)
-        False -> choose_best_free_index(rest, best, target_index, preferred_day_count)
+        True ->
+          choose_best_free_index(rest, index, target_index, preferred_day_count)
+        False ->
+          choose_best_free_index(rest, best, target_index, preferred_day_count)
       }
   }
 }
@@ -1292,14 +1380,16 @@ fn choose_best_overlap_index_loop(
   case indices {
     [] -> best
     [index, ..rest] ->
-      case better_overlap_index(
-        index,
-        best,
-        target_index,
-        preferred_day_count,
-        allowed_days,
-        occupancy,
-      ) {
+      case
+        better_overlap_index(
+          index,
+          best,
+          target_index,
+          preferred_day_count,
+          allowed_days,
+          occupancy,
+        )
+      {
         True ->
           choose_best_overlap_index_loop(
             rest,
@@ -1329,14 +1419,23 @@ fn better_free_index(
   target_index: Int,
   preferred_day_count: Int,
 ) -> Bool {
-  case int.compare(preferred_penalty(left, preferred_day_count), preferred_penalty(right, preferred_day_count)) {
+  case
+    int.compare(
+      preferred_penalty(left, preferred_day_count),
+      preferred_penalty(right, preferred_day_count),
+    )
+  {
     Lt -> True
     Gt -> False
     Eq -> compare_distance_then_left(left, right, target_index)
   }
 }
 
-fn compare_distance_then_left(left: Int, right: Int, target_index: Int) -> Bool {
+fn compare_distance_then_left(
+  left: Int,
+  right: Int,
+  target_index: Int,
+) -> Bool {
   let left_distance = abs_int(left - target_index)
   let right_distance = abs_int(right - target_index)
 
@@ -1355,34 +1454,83 @@ fn better_overlap_index(
   allowed_days: List(calendar.Date),
   occupancy: dict.Dict(String, Int),
 ) -> Bool {
-  let left_slots = slot_count(occupancy, date_for_index(allowed_days, left))
-  let right_slots = slot_count(occupancy, date_for_index(allowed_days, right))
+  let left_distance = abs_int(left - target_index)
+  let right_distance = abs_int(right - target_index)
 
-  case int.compare(left_slots, right_slots) {
+  case int.compare(left_distance, right_distance) {
     Lt -> True
     Gt -> False
 
-    Eq ->
-      case int.compare(
-        preferred_penalty(left, preferred_day_count),
-        preferred_penalty(right, preferred_day_count),
-      ) {
+    Eq -> {
+      let left_slots = slot_count(occupancy, date_for_index(allowed_days, left))
+      let right_slots =
+        slot_count(occupancy, date_for_index(allowed_days, right))
+
+      case int.compare(left_slots, right_slots) {
         Lt -> True
         Gt -> False
-        Eq -> compare_distance_then_left(left, right, target_index)
+
+        Eq ->
+          case
+            int.compare(
+              preferred_penalty(left, preferred_day_count),
+              preferred_penalty(right, preferred_day_count),
+            )
+          {
+            Lt -> True
+            Gt -> False
+            Eq -> left < right
+          }
       }
+    }
   }
 }
 
-fn target_day_index(module_index: Int, module_count: Int, day_count: Int) -> Int {
+fn better_balanced_index(
+  left: Int,
+  right: Int,
+  target_index: Int,
+  allowed_days: List(calendar.Date),
+  occupancy: dict.Dict(String, Int),
+) -> Bool {
+  let left_distance = abs_int(left - target_index)
+  let right_distance = abs_int(right - target_index)
+
+  case int.compare(left_distance, right_distance) {
+    Lt -> True
+    Gt -> False
+
+    Eq -> {
+      let left_slots = slot_count(occupancy, date_for_index(allowed_days, left))
+      let right_slots =
+        slot_count(occupancy, date_for_index(allowed_days, right))
+
+      case int.compare(left_slots, right_slots) {
+        Lt -> True
+        Gt -> False
+        Eq -> left < right
+      }
+    }
+  }
+}
+
+fn target_day_index(
+  module_index: Int,
+  module_count: Int,
+  day_count: Int,
+) -> Int {
   case module_count <= 1 || day_count <= 1 {
     True -> 0
     False -> { module_index * { day_count - 1 } } / { module_count - 1 }
   }
 }
 
-fn effective_target_day_count(preferred_day_count: Int, hard_day_count: Int) -> Int {
-  case preferred_day_count > 0 {
+fn effective_target_day_count(
+  preferred_day_count: Int,
+  hard_day_count: Int,
+  module_count: Int,
+) -> Int {
+  case preferred_day_count > 0 && module_count <= preferred_day_count {
     True -> preferred_day_count
     False -> hard_day_count
   }
@@ -1393,7 +1541,12 @@ fn compare_candidate(left: CandidateCourse, right: CandidateCourse) -> Order {
     Eq ->
       case compare_density(left, right) {
         Eq ->
-          case date.compare(left.plan.effective_deadline, right.plan.effective_deadline) {
+          case
+            date.compare(
+              left.plan.effective_deadline,
+              right.plan.effective_deadline,
+            )
+          {
             Eq -> string.compare(left.plan.course.name, right.plan.course.name)
             other -> other
           }
@@ -1407,9 +1560,17 @@ fn compare_candidate(left: CandidateCourse, right: CandidateCourse) -> Order {
 
 fn compare_density(left: CandidateCourse, right: CandidateCourse) -> Order {
   let left_days =
-    effective_target_day_count(left.preferred_day_count, list.length(left.allowed_days))
+    effective_target_day_count(
+      left.preferred_day_count,
+      list.length(left.allowed_days),
+      list.length(left.plan.remaining),
+    )
   let right_days =
-    effective_target_day_count(right.preferred_day_count, list.length(right.allowed_days))
+    effective_target_day_count(
+      right.preferred_day_count,
+      list.length(right.allowed_days),
+      list.length(right.plan.remaining),
+    )
   let left_modules = list.length(left.plan.remaining)
   let right_modules = list.length(right.plan.remaining)
 
@@ -1454,11 +1615,10 @@ fn earliest_start_date(
       }
     })
 
-  let earliest =
-    case date.compare(latest_finish, date.day_before(today)) {
-      Eq -> today
-      _ -> date.day_after(latest_finish)
-    }
+  let earliest = case date.compare(latest_finish, date.day_before(today)) {
+    Eq -> today
+    _ -> date.day_after(latest_finish)
+  }
 
   next_allowed_day(earliest, settings)
 }
@@ -1473,7 +1633,10 @@ fn preferred_deadline(
   }
 }
 
-fn next_allowed_day(day: calendar.Date, settings: model.Settings) -> calendar.Date {
+fn next_allowed_day(
+  day: calendar.Date,
+  settings: model.Settings,
+) -> calendar.Date {
   case should_skip_day(settings, day) {
     True -> next_allowed_day(date.day_after(day), settings)
     False -> day
@@ -1548,7 +1711,8 @@ fn effective_deadline(
 
         False -> {
           use course <- result.try(find_course(courses, course_id))
-          let dependent_ids = dict.get(dependents, course_id) |> result.unwrap([])
+          let dependent_ids =
+            dict.get(dependents, course_id) |> result.unwrap([])
           use next_cache <- result.try(
             list.try_fold(dependent_ids, cache, fn(inner_cache, dependent_id) {
               effective_deadline(
@@ -1589,9 +1753,13 @@ fn visit(
       use course <- result.try(find_course(courses, course_id))
       let states = dict.insert(states, course_id, "visiting")
       use states <- result.try(
-        list.try_fold(course.prerequisite_ids, states, fn(next_states, prerequisite_id) {
-          visit(prerequisite_id, courses, next_states)
-        }),
+        list.try_fold(
+          course.prerequisite_ids,
+          states,
+          fn(next_states, prerequisite_id) {
+            visit(prerequisite_id, courses, next_states)
+          },
+        ),
       )
       Ok(dict.insert(states, course_id, "done"))
     }
@@ -1631,8 +1799,7 @@ fn impossible_conflict(course: model.Course) -> model.Conflict {
     course_id: course.id,
     vendor_name: course.vendor_name,
     course_name: course.name,
-    message:
-      "This course cannot be scheduled before its deadline with the current prerequisites and completed work.",
+    message: "This course cannot be scheduled before its deadline with the current prerequisites and completed work.",
   )
 }
 
@@ -1641,12 +1808,14 @@ fn blocked_conflict(course: model.Course) -> model.Conflict {
     course_id: course.id,
     vendor_name: course.vendor_name,
     course_name: course.name,
-    message:
-      "This course is blocked because one of its prerequisites could not finish before the deadline.",
+    message: "This course is blocked because one of its prerequisites could not finish before the deadline.",
   )
 }
 
-fn should_skip_day(settings: model.Settings, current_day: calendar.Date) -> Bool {
+fn should_skip_day(
+  settings: model.Settings,
+  current_day: calendar.Date,
+) -> Bool {
   case settings.include_weekends, date.is_weekend(current_day) {
     False, True -> True
     _, _ -> False
@@ -1715,7 +1884,9 @@ fn find_course(
 ) -> Result(model.Course, model.AppError) {
   courses
   |> list.find(fn(course) { course.id == course_id })
-  |> result.map_error(fn(_) { model.Parse("Unknown course id in prerequisite graph") })
+  |> result.map_error(fn(_) {
+    model.Parse("Unknown course id in prerequisite graph")
+  })
 }
 
 fn index_range(start: Int, finish: Int) -> List(Int) {
@@ -1727,7 +1898,7 @@ fn index_range(start: Int, finish: Int) -> List(Int) {
 
 fn date_for_index(days: List(calendar.Date), index: Int) -> calendar.Date {
   case days, index {
-    [day, .._], 0 -> day
+    [day, ..], 0 -> day
     [_, ..rest], _ -> date_for_index(rest, index - 1)
     [], _ -> panic as "Invalid schedule day index"
   }
@@ -1747,9 +1918,7 @@ fn max_int(left: Int, right: Int) -> Int {
   }
 }
 
-fn reverse_both(
-  input: #(List(a), List(b)),
-) -> #(List(a), List(b)) {
+fn reverse_both(input: #(List(a), List(b))) -> #(List(a), List(b)) {
   let #(left, right) = input
   #(list.reverse(left), list.reverse(right))
 }
