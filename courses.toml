@@ -1,0 +1,19 @@
+["AWS Academy"."Cloud Foundations"]
+module_range = { prefix = "Module ", start = 7, end = 10 }
+deadline = 2026-07-31T23:59:59-03:00
+
+["Cisco Networking Academy"."Fundamentos de segurança cibernética"]
+module_range = { prefix = "Module ", start = 1, end = 27 }
+deadline = 2026-07-31T23:59:59-03:00
+
+["Cisco Networking Academy"."Introdução às Redes"]
+module_range = { prefix = "Module ", start = 1, end = 17 }
+deadline = 2026-07-30T23:59:59-03:00
+
+["Red Hat Academy"."Red Hat Application Development I: Programming in Java EE 7.0"]
+module_range = { prefix = "Module ", start = 2, end = 10 }
+deadline = 2026-06-21T23:59:59-03:00
+
+["Red Hat Academy"."Red Hat System Administration I 10.0"]
+module_range = { prefix = "Module ", start = 14, end = 20 }
+deadline = 2026-06-22T23:59:59-03:00

@@ -3,7 +3,6 @@
 /build
 erl_crash.dump
 
-courses.toml
 aliahan.sqlite3
 
 node_modules/
