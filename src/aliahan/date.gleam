@@ -17,10 +17,12 @@ pub fn today() -> calendar.Date {
 pub fn compare(left: calendar.Date, right: calendar.Date) -> Order {
   case int.compare(left.year, right.year) {
     Eq ->
-      case int.compare(
-        calendar.month_to_int(left.month),
-        calendar.month_to_int(right.month),
-      ) {
+      case
+        int.compare(
+          calendar.month_to_int(left.month),
+          calendar.month_to_int(right.month),
+        )
+      {
         Eq -> int.compare(left.day, right.day)
         other -> other
       }
@@ -75,7 +77,11 @@ pub fn parse_iso(input: String) -> Result(calendar.Date, AppError) {
 
 pub fn add_days(date: calendar.Date, amount: Int) -> calendar.Date {
   let midnight = calendar.TimeOfDay(0, 0, 0, 0)
-  timestamp.from_calendar(date: date, time: midnight, offset: calendar.utc_offset)
+  timestamp.from_calendar(
+    date: date,
+    time: midnight,
+    offset: calendar.utc_offset,
+  )
   |> timestamp.add(duration.hours(24 * amount))
   |> timestamp.to_calendar(calendar.utc_offset)
   |> first
@@ -98,7 +104,8 @@ pub fn days_in_month(year: Int, month: calendar.Month) -> Int {
     | calendar.August
     | calendar.October
     | calendar.December -> 31
-    calendar.April | calendar.June | calendar.September | calendar.November -> 30
+    calendar.April | calendar.June | calendar.September | calendar.November ->
+      30
     calendar.February ->
       case is_leap_year(year) {
         True -> 29
@@ -147,9 +154,12 @@ pub fn weekday_number(date: calendar.Date) -> Int {
   let month_offset = list_nth(offsets, month - 1)
   let value =
     adjusted_year
-    + adjusted_year / 4
-    - adjusted_year / 100
-    + adjusted_year / 400
+    + adjusted_year
+    / 4
+    - adjusted_year
+    / 100
+    + adjusted_year
+    / 400
     + month_offset
     + date.day
   let sunday_based = modulo(value, 7)
@@ -241,7 +251,7 @@ fn is_leap_year(year: Int) -> Bool {
 
 fn list_nth(values: List(Int), index: Int) -> Int {
   case values, index {
-    [value, .._], 0 -> value
+    [value, ..], 0 -> value
     [_, ..rest], _ -> list_nth(rest, index - 1)
     [], _ -> 0
   }
