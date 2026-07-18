@@ -7,25 +7,40 @@ async function api(path, options = {}) {
     headers: { "content-type": "application/json", ...(options.headers || {}) },
     ...options,
   });
-  const payload = await response.json();
-  if (!response.ok || payload.ok === false) {
-    throw new Error(payload.error || "Request failed");
+  const body = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    // Wisp may return plain text before a request reaches an API handler.
   }
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(payload?.error || body || "Request failed");
+  }
+  if (!payload) throw new Error("Invalid server response");
   return payload.data;
 }
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateIso(new Date());
+}
+
+function localDateIso(date) {
+  const year = String(date.getFullYear()).padStart(4, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function shiftAnchor(anchor, view, delta) {
   const d = new Date(`${anchor}T00:00:00`);
   if (view === "month") {
+    d.setDate(1);
     d.setMonth(d.getMonth() + delta);
   } else {
     d.setDate(d.getDate() + delta * 7);
   }
-  return d.toISOString().slice(0, 10);
+  return localDateIso(d);
 }
 
 // Vendor color palette and persistence

@@ -6,3 +6,4 @@ erl_crash.dump
 aliahan.sqlite3
 
 node_modules/
+.pnpm-store/

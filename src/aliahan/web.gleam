@@ -198,17 +198,38 @@ fn request_schedule(
   request: wisp.Request,
 ) -> Result(#(String, calendar.Date, Option(calendar.Date)), String) {
   let query = wisp.get_query(request)
-  let view = case list.key_find(query, "view") {
-    Ok("month") -> "month"
-    _ -> "week"
-  }
-  let anchor = case list.key_find(query, "anchor") {
-    Ok(value) -> date.parse_iso(value) |> result.unwrap(date.today())
-    Error(_) -> date.today()
-  }
+  use view <- result.try(view_query(query))
+  use anchor <- result.try(date_query(
+    query,
+    "anchor",
+    "Anchor date",
+    date.today(),
+  ))
   case optional_date_query(query, "start", "Start date") {
     Ok(schedule_start) -> Ok(#(view, anchor, schedule_start))
     Error(message) -> Error(message)
+  }
+}
+
+fn view_query(query: List(#(String, String))) -> Result(String, String) {
+  case list.key_find(query, "view") {
+    Error(_) | Ok("week") -> Ok("week")
+    Ok("month") -> Ok("month")
+    Ok(_) -> Error("View must be week or month")
+  }
+}
+
+fn date_query(
+  query: List(#(String, String)),
+  key: String,
+  label: String,
+  default: calendar.Date,
+) -> Result(calendar.Date, String) {
+  case list.key_find(query, key) {
+    Error(_) | Ok("") -> Ok(default)
+    Ok(value) ->
+      date.parse_iso(value)
+      |> result.map_error(fn(_) { label <> " must be a YYYY-MM-DD date" })
   }
 }
 
@@ -403,8 +424,10 @@ fn module_reorder_decoder() -> decode.Decoder(List(Int)) {
 }
 
 fn parse_id(text: String) -> Result(Int, String) {
-  int.parse(text)
-  |> result.map_error(fn(_) { "Invalid numeric id: " <> text })
+  case int.parse(text) {
+    Ok(id) if id > 0 -> Ok(id)
+    _ -> Error("Invalid positive numeric id: " <> text)
+  }
 }
 
 fn app_error(error: model.AppError) -> wisp.Response {

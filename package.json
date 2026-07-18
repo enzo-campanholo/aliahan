@@ -1,10 +1,10 @@
 {
   "name": "aliahan",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "A local course planning app",
   "scripts": {
     "build:css": "tailwindcss -i priv/input.css -o priv/app.css",
+    "check:js": "node --check priv/app.js",
     "vendor:alpine": "cp node_modules/alpinejs/dist/cdn.min.js priv/alpine.min.js",
     "watch:css": "tailwindcss -i priv/input.css -o priv/app.css --watch"
   },

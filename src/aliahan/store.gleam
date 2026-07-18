@@ -31,6 +31,8 @@ const default_database_path = "aliahan.sqlite3"
 
 const default_courses_toml_path = "courses.toml"
 
+const max_modules_per_course = 1000
+
 type ScheduleMutation {
   KeepStoredSchedule
   RebuildStoredSchedule
@@ -61,15 +63,15 @@ pub fn initialise() -> Result(Nil, AppError) {
     with_db(fn(connection) {
       use _ <- result.try(prepare_schema(connection))
 
-      let is_empty = has_courses(connection) |> result.unwrap(False) |> bool_not
+      use contains_courses <- result.try(has_courses(connection))
 
-      use _ <- result.try(case is_empty {
-        True ->
+      use _ <- result.try(case contains_courses {
+        False ->
           case simplifile.is_file(courses_toml_path()) {
             Ok(True) -> transactional(connection, import_from_toml)
             _ -> transactional(connection, refresh_schedule_in_transaction)
           }
-        False -> transactional(connection, refresh_schedule_in_transaction)
+        True -> transactional(connection, refresh_schedule_in_transaction)
       })
 
       Ok(Nil)
@@ -86,7 +88,7 @@ pub fn bootstrap(
   schedule_start: Option(calendar.Date),
 ) -> Result(BootstrapData, AppError) {
   with_db(fn(connection) {
-    use _ <- result.try(prepare_schema(connection))
+    use _ <- result.try(enable_foreign_keys(connection))
     let today = date.today()
     case schedule_start {
       Some(schedule_start) -> {
@@ -133,7 +135,7 @@ pub fn schedule_view(
   schedule_start: Option(calendar.Date),
 ) -> Result(ScheduleView, AppError) {
   with_db(fn(connection) {
-    use _ <- result.try(prepare_schema(connection))
+    use _ <- result.try(enable_foreign_keys(connection))
     case schedule_start {
       Some(schedule_start) -> {
         use settings <- result.try(load_settings(connection))
@@ -183,8 +185,7 @@ pub fn set_settings(patch: SettingsPatch) -> Result(Nil, AppError) {
 
 pub fn create_vendor(name: String) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
-    let name = validate_name(name, "Vendor name") |> result.unwrap("")
-    use _ <- result.try(validate_name(name, "Vendor name"))
+    use name <- result.try(validate_name(name, "Vendor name"))
     use _ <- result.try(exec_with_args(
       "insert into vendors (name) values (?)",
       [sqlight.text(name)],
@@ -196,16 +197,7 @@ pub fn create_vendor(name: String) -> Result(Nil, AppError) {
 
 pub fn delete_vendor(vendor_id: Int) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
-    use _ <- result.try(exec_with_args(
-      "delete from modules where course_id in (select id from courses where vendor_id = ?)",
-      [sqlight.int(vendor_id)],
-      connection,
-    ))
-    use _ <- result.try(exec_with_args(
-      "delete from courses where vendor_id = ?",
-      [sqlight.int(vendor_id)],
-      connection,
-    ))
+    use _ <- result.try(ensure_vendor_exists(connection, vendor_id))
     use _ <- result.try(exec_with_args(
       "delete from vendors where id = ?",
       [sqlight.int(vendor_id)],
@@ -221,7 +213,7 @@ pub fn create_course(input: NewCourseInput) -> Result(Nil, AppError) {
     use _ <- result.try(ensure_vendor_exists(connection, input.vendor_id))
     let deadline = date.to_iso(input.deadline)
     let module_range = module_range_from_input(input.modules)
-    let generated_modules = expand_modules(input.modules)
+    use generated_modules <- result.try(expand_modules(input.modules))
     use _ <- result.try(validate_modules(generated_modules))
 
     use course_id <- result.try(insert_course_row(
@@ -302,6 +294,7 @@ pub fn update_course(
 
 pub fn delete_course(course_id: Int) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
+    use _ <- result.try(course_vendor_id(connection, course_id))
     use _ <- result.try(exec_with_args(
       "delete from courses where id = ?",
       [sqlight.int(course_id)],
@@ -313,15 +306,15 @@ pub fn delete_course(course_id: Int) -> Result(Nil, AppError) {
 
 pub fn add_module(course_id: Int, name: String) -> Result(Nil, AppError) {
   apply_mutation(fn(connection) {
+    use _ <- result.try(course_vendor_id(connection, course_id))
     use name <- result.try(validate_name(name, "Module name"))
-    let next_position =
-      query_one(
-        "select coalesce(max(position), 0) + 1 from modules where course_id = ?",
-        [sqlight.int(course_id)],
-        int_decoder(),
-        connection,
-      )
-      |> result.unwrap(1)
+    use _ <- result.try(ensure_module_capacity(connection, course_id))
+    use next_position <- result.try(query_one(
+      "select coalesce(max(position), 0) + 1 from modules where course_id = ?",
+      [sqlight.int(course_id)],
+      int_decoder(),
+      connection,
+    ))
 
     use _ <- result.try(exec_with_args(
       "
@@ -465,7 +458,7 @@ fn apply_mutation(
 ) -> Result(Nil, AppError) {
   use _ <- result.try(
     with_db(fn(connection) {
-      use _ <- result.try(prepare_schema(connection))
+      use _ <- result.try(enable_foreign_keys(connection))
       use _ <- result.try(
         transactional(connection, fn(tx) {
           use schedule_mutation <- result.try(mutation(tx))
@@ -503,7 +496,7 @@ fn with_db(
 }
 
 fn prepare_schema(connection: sqlight.Connection) -> Result(Nil, AppError) {
-  use _ <- result.try(exec(connection, "pragma foreign_keys = on"))
+  use _ <- result.try(enable_foreign_keys(connection))
   use _ <- result.try(exec(connection, schema_sql))
   use _ <- result.try(ensure_app_settings_columns(connection))
   exec(
@@ -518,6 +511,12 @@ fn prepare_schema(connection: sqlight.Connection) -> Result(Nil, AppError) {
     values (1, 0, 0, null)
     ",
   )
+}
+
+fn enable_foreign_keys(
+  connection: sqlight.Connection,
+) -> Result(Nil, AppError) {
+  exec(connection, "pragma foreign_keys = on")
 }
 
 fn transactional(
@@ -551,7 +550,14 @@ fn import_from_toml(
   use imported <- result.try(config.parse_courses_toml(contents))
   use _ <- result.try(
     list.try_fold(imported, dict.new(), fn(vendor_ids, imported_course) {
-      let vendor_name = imported_course.vendor_name |> string.trim
+      use vendor_name <- result.try(validate_name(
+        imported_course.vendor_name,
+        "Vendor name",
+      ))
+      use course_name <- result.try(validate_name(
+        imported_course.course_name,
+        "Course name",
+      ))
       let existing_vendor_id = dict.get(vendor_ids, vendor_name)
       let vendor_id_result = case existing_vendor_id {
         Ok(vendor_id) -> Ok(vendor_id)
@@ -560,12 +566,12 @@ fn import_from_toml(
       use vendor_id <- result.try(vendor_id_result)
 
       let module_range = module_range_from_input(imported_course.modules)
-      let modules = expand_modules(imported_course.modules)
+      use modules <- result.try(expand_modules(imported_course.modules))
       use _ <- result.try(validate_modules(modules))
       use course_id <- result.try(insert_course_row(
         connection,
         vendor_id,
-        imported_course.course_name |> string.trim,
+        course_name,
         date.to_iso(imported_course.deadline),
         module_range,
       ))
@@ -574,17 +580,21 @@ fn import_from_toml(
     }),
   )
 
-  use courses <- result.try(load_courses(connection))
   use _ <- result.try(
     list.try_fold(imported, Nil, fn(_, imported_course) {
-      use vendor_id <- result.try(find_vendor_id(
-        connection,
+      use vendor_name <- result.try(validate_name(
         imported_course.vendor_name,
+        "Vendor name",
       ))
+      use course_name <- result.try(validate_name(
+        imported_course.course_name,
+        "Course name",
+      ))
+      use vendor_id <- result.try(find_vendor_id(connection, vendor_name))
       use course_id <- result.try(find_course_id(
         connection,
         vendor_id,
-        imported_course.course_name,
+        course_name,
       ))
       use prerequisite_ids <- result.try(resolve_prerequisites(
         connection,
@@ -595,7 +605,6 @@ fn import_from_toml(
     }),
   )
 
-  let _ = courses
   refresh_schedule_in_transaction(connection)
 }
 
@@ -1123,7 +1132,7 @@ fn ensure_vendor_id(
 ) -> Result(Int, AppError) {
   case find_vendor_id(connection, name) {
     Ok(vendor_id) -> Ok(vendor_id)
-    Error(_) -> {
+    Error(NotFound(_)) -> {
       use _ <- result.try(exec_with_args(
         "insert into vendors (name) values (?)",
         [sqlight.text(name)],
@@ -1131,6 +1140,7 @@ fn ensure_vendor_id(
       ))
       query_one("select last_insert_rowid()", [], int_decoder(), connection)
     }
+    Error(error) -> Error(error)
   }
 }
 
@@ -1301,6 +1311,7 @@ fn resolve_prerequisites(
   names
   |> list.map(string.trim)
   |> list.filter(fn(name) { name != "" })
+  |> list.unique
   |> list.try_map(fn(name) { find_course_id(connection, vendor_id, name) })
 }
 
@@ -1392,16 +1403,61 @@ fn delete_schedule_entry(
   )
 }
 
-fn expand_modules(input: CourseModulesInput) -> List(String) {
+fn expand_modules(input: CourseModulesInput) -> Result(List(String), AppError) {
   case input {
     ExplicitModules(modules) ->
       modules
       |> list.map(string.trim)
       |> list.filter(fn(name) { name != "" })
-    GeneratedRange(range) ->
+      |> Ok
+    GeneratedRange(range) -> {
+      use _ <- result.try(validate_module_range(range))
       range_inclusive(range.start, range.end)
       |> list.map(fn(number) { range.prefix <> int.to_string(number) })
+      |> Ok
+    }
   }
+}
+
+fn validate_module_range(range: ModuleRange) -> Result(Nil, AppError) {
+  let size = range.end - range.start + 1
+  case
+    string.trim(range.prefix) == "",
+    range.start < 1,
+    range.end < range.start,
+    size > max_modules_per_course
+  {
+    True, _, _, _ -> Error(Validation("Module range prefix cannot be empty"))
+    _, True, _, _ -> Error(Validation("Module range start must be at least 1"))
+    _, _, True, _ ->
+      Error(Validation("Module range end cannot be before its start"))
+    _, _, _, True -> Error(module_limit_error())
+    _, _, _, _ -> Ok(Nil)
+  }
+}
+
+fn ensure_module_capacity(
+  connection: sqlight.Connection,
+  course_id: Int,
+) -> Result(Nil, AppError) {
+  use module_count <- result.try(query_one(
+    "select count(*) from modules where course_id = ?",
+    [sqlight.int(course_id)],
+    int_decoder(),
+    connection,
+  ))
+  case module_count >= max_modules_per_course {
+    True -> Error(module_limit_error())
+    False -> Ok(Nil)
+  }
+}
+
+fn module_limit_error() -> AppError {
+  Validation(
+    "A course cannot contain more than "
+    <> int.to_string(max_modules_per_course)
+    <> " modules",
+  )
 }
 
 fn module_range_from_input(input: CourseModulesInput) -> Option(ModuleRange) {
@@ -1430,9 +1486,13 @@ fn validate_name(name: String, label: String) -> Result(String, AppError) {
 }
 
 fn validate_modules(modules: List(String)) -> Result(Nil, AppError) {
-  case modules == [] {
-    True -> Error(Validation("A course must contain at least one module"))
-    False -> Ok(Nil)
+  case modules {
+    [] -> Error(Validation("A course must contain at least one module"))
+    _ ->
+      case list.length(modules) > max_modules_per_course {
+        True -> Error(module_limit_error())
+        False -> Ok(Nil)
+      }
   }
 }
 
@@ -1753,13 +1813,6 @@ fn sql_error(error: sqlight.Error) -> AppError {
 
 fn file_error(error: simplifile.FileError) -> AppError {
   IOError("File error: " <> string.inspect(error))
-}
-
-fn bool_not(value: Bool) -> Bool {
-  case value {
-    True -> False
-    False -> True
-  }
 }
 
 fn path_from_env(name: String, fallback: String) -> String {

@@ -133,14 +133,13 @@ pub fn rebuild(
           dict.insert(acc, course_id, date.day_before(today))
         })
 
-      let #(stored_entries, conflicts, _) =
+      let #(stored_entries, conflicts) =
         schedule_courses(
           active_courses,
           settings,
           today,
           finished_dates,
           dict.new(),
-          [],
           [],
           [],
         )
@@ -173,11 +172,10 @@ fn schedule_courses(
   finished_dates: dict.Dict(Int, calendar.Date),
   occupancy: dict.Dict(String, Int),
   stored_entries: List(StoredEntry),
-  schedule_entries: List(model.ScheduleEntry),
   conflicts: List(model.Conflict),
-) -> #(List(StoredEntry), List(model.Conflict), List(model.ScheduleEntry)) {
+) -> #(List(StoredEntry), List(model.Conflict)) {
   case planned {
-    [] -> #(stored_entries, conflicts, schedule_entries)
+    [] -> #(stored_entries, conflicts)
 
     _ -> {
       let #(ready, blocked) = split_ready(planned, finished_dates)
@@ -200,12 +198,12 @@ fn schedule_courses(
             |> list.map(fn(plan) { blocked_conflict(plan.course) })
             |> list.reverse
             |> list.append(conflicts)
-          #(stored_entries, blocked_conflicts, schedule_entries)
+          #(stored_entries, blocked_conflicts)
         }
 
         [selected, ..remaining_candidates] -> {
-          let #(next_occupancy, next_stored, next_schedule_entries, finish_date) =
-            place_course(selected, occupancy, stored_entries, schedule_entries)
+          let #(next_occupancy, next_stored, finish_date) =
+            place_course(selected, occupancy, stored_entries)
 
           let next_finished =
             dict.insert(finished_dates, selected.plan.course.id, finish_date)
@@ -221,7 +219,6 @@ fn schedule_courses(
             next_finished,
             next_occupancy,
             next_stored,
-            next_schedule_entries,
             conflicts,
           )
         }
@@ -1136,15 +1133,8 @@ fn place_course(
   candidate: CandidateCourse,
   occupancy: dict.Dict(String, Int),
   stored_entries: List(StoredEntry),
-  schedule_entries: List(model.ScheduleEntry),
-) -> #(
-  dict.Dict(String, Int),
-  List(StoredEntry),
-  List(model.ScheduleEntry),
-  calendar.Date,
-) {
+) -> #(dict.Dict(String, Int), List(StoredEntry), calendar.Date) {
   place_modules(
-    candidate.plan.course,
     candidate.plan.remaining,
     candidate.allowed_days,
     candidate.preferred_day_count,
@@ -1154,13 +1144,11 @@ fn place_course(
     0,
     occupancy,
     stored_entries,
-    schedule_entries,
     candidate.earliest_start,
   )
 }
 
 fn place_modules(
-  course: model.Course,
   modules: List(model.Module),
   allowed_days: List(calendar.Date),
   preferred_day_count: Int,
@@ -1170,16 +1158,10 @@ fn place_modules(
   min_index: Int,
   occupancy: dict.Dict(String, Int),
   stored_entries: List(StoredEntry),
-  schedule_entries: List(model.ScheduleEntry),
   last_assigned_day: calendar.Date,
-) -> #(
-  dict.Dict(String, Int),
-  List(StoredEntry),
-  List(model.ScheduleEntry),
-  calendar.Date,
-) {
+) -> #(dict.Dict(String, Int), List(StoredEntry), calendar.Date) {
   case modules {
-    [] -> #(occupancy, stored_entries, schedule_entries, last_assigned_day)
+    [] -> #(occupancy, stored_entries, last_assigned_day)
 
     [module, ..rest] -> {
       let target_day_count =
@@ -1206,18 +1188,7 @@ fn place_modules(
           scheduled_date: assigned_day,
           slot_index: slot_index,
         )
-      let schedule_entry =
-        model.ScheduleEntry(
-          module_id: module.id,
-          vendor_name: course.vendor_name,
-          course_name: course.name,
-          module_name: module.name,
-          scheduled_date: assigned_day,
-          slot_index: slot_index,
-        )
-
       place_modules(
-        course,
         rest,
         allowed_days,
         preferred_day_count,
@@ -1227,7 +1198,6 @@ fn place_modules(
         chosen_index,
         occupancy,
         [stored_entry, ..stored_entries],
-        [schedule_entry, ..schedule_entries],
         assigned_day,
       )
     }

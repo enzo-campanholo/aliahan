@@ -3,7 +3,7 @@ import aliahan/model
 import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import gleam/time/calendar
@@ -144,13 +144,13 @@ fn parse_modules(
   vendor_name: String,
   course_name: String,
 ) -> Result(model.CourseModulesInput, model.AppError) {
-  let modules = optional_string_array(table, "modules")
-  let module_range = optional_module_range(table)
+  use modules <- result.try(optional_string_array(table, "modules"))
+  use module_range <- result.try(optional_module_range(table))
 
   case modules, module_range {
-    Ok(modules), Error(_) -> Ok(model.ExplicitModules(modules))
-    Error(_), Ok(module_range) -> Ok(model.GeneratedRange(module_range))
-    Ok(_), Ok(_) ->
+    Some(modules), None -> Ok(model.ExplicitModules(modules))
+    None, Some(module_range) -> Ok(model.GeneratedRange(module_range))
+    Some(_), Some(_) ->
       Error(model.Parse(
         "Course "
         <> vendor_name
@@ -158,7 +158,7 @@ fn parse_modules(
         <> course_name
         <> " cannot define both modules and module_range",
       ))
-    Error(_), Error(_) ->
+    None, None ->
       Error(model.Parse(
         "Course "
         <> vendor_name
@@ -172,17 +172,19 @@ fn parse_modules(
 fn optional_string_array(
   table: dict.Dict(String, tom.Toml),
   key: String,
-) -> Result(List(String), Nil) {
+) -> Result(Option(List(String)), model.AppError) {
   case tom.get_array(table, [key]) {
     Ok(items) ->
       items
       |> list.try_map(fn(item) {
         case item {
           tom.String(value) -> Ok(value)
-          _ -> Error(Nil)
+          _ -> Error(model.Parse(key <> " must contain only strings"))
         }
       })
-    Error(_) -> Error(Nil)
+      |> result.map(Some)
+    Error(tom.NotFound(_)) -> Ok(None)
+    Error(_) -> Error(model.Parse(key <> " must be an array"))
   }
 }
 
@@ -207,18 +209,39 @@ fn parse_string_array(
 
 fn optional_module_range(
   table: dict.Dict(String, tom.Toml),
-) -> Result(model.ModuleRange, Nil) {
-  use range_table <- result.try(
-    tom.get_table(table, ["module_range"]) |> result.map_error(fn(_) { Nil }),
-  )
+) -> Result(Option(model.ModuleRange), model.AppError) {
+  let range_table = case tom.get_table(table, ["module_range"]) {
+    Ok(range_table) -> Ok(Some(range_table))
+    Error(tom.NotFound(_)) -> Ok(None)
+    Error(_) -> Error(model.Parse("module_range must be a table"))
+  }
+  use range_table <- result.try(range_table)
+  case range_table {
+    None -> Ok(None)
+    Some(range_table) -> parse_module_range(range_table) |> result.map(Some)
+  }
+}
+
+fn parse_module_range(
+  range_table: dict.Dict(String, tom.Toml),
+) -> Result(model.ModuleRange, model.AppError) {
   use prefix <- result.try(
-    tom.get_string(range_table, ["prefix"]) |> result.map_error(fn(_) { Nil }),
+    tom.get_string(range_table, ["prefix"])
+    |> result.map_error(fn(_) {
+      model.Parse("module_range.prefix must be a string")
+    }),
   )
   use start <- result.try(
-    tom.get_int(range_table, ["start"]) |> result.map_error(fn(_) { Nil }),
+    tom.get_int(range_table, ["start"])
+    |> result.map_error(fn(_) {
+      model.Parse("module_range.start must be an integer")
+    }),
   )
   use finish <- result.try(
-    tom.get_int(range_table, ["end"]) |> result.map_error(fn(_) { Nil }),
+    tom.get_int(range_table, ["end"])
+    |> result.map_error(fn(_) {
+      model.Parse("module_range.end must be an integer")
+    }),
   )
   Ok(model.ModuleRange(prefix:, start:, end: finish))
 }

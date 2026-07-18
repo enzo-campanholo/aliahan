@@ -7,7 +7,6 @@ pub type AppError {
   IOError(message: String)
   Database(message: String)
   Parse(message: String)
-  Unexpected(message: String)
 }
 
 pub fn error_message(error: AppError) -> String {
@@ -16,8 +15,7 @@ pub fn error_message(error: AppError) -> String {
     | NotFound(message)
     | IOError(message)
     | Database(message)
-    | Parse(message)
-    | Unexpected(message) -> message
+    | Parse(message) -> message
   }
 }
 

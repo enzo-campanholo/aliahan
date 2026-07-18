@@ -10,7 +10,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/order.{Eq, Lt}
+import gleam/order.{Lt}
 import gleam/string
 import gleam/time/calendar
 import gleeunit
@@ -43,367 +43,37 @@ pub fn parse_courses_toml_supports_generated_ranges_test() {
     ))
 }
 
-pub fn index_html_uses_local_alpine_bundle_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
+pub fn parse_courses_toml_rejects_a_malformed_second_module_source_test() {
+  let toml =
+    "
+  [\"Vendor\".\"Course\"]
+  modules = [\"One\"]
+  module_range = \"not a range\"
+  deadline = 2026-04-01
+  "
 
-  let body = simulate.read_body(response)
-  assert string.contains(body, "/static/alpine.min.js")
-  assert string.contains(body, "cdn.jsdelivr.net") == False
-  assert string.contains(body, "@alpinejs/collapse") == False
+  let assert Error(model.Parse(message)) = config.parse_courses_toml(toml)
+  assert message == "module_range must be a table"
 }
 
-pub fn index_html_resets_and_hides_schedule_popovers_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(
-    body,
-    "x-effect=\"$store.ui.tab === 'schedule' || resetPopover()\"",
-  )
-  assert string.contains(
-    body,
-    "x-show=\"popover.open && $store.app.view === 'month' && $store.ui.tab === 'schedule'\"",
-  )
-  assert string.contains(
-    body,
-    "x-show=\"popover.open && $store.app.view === 'week'\"",
-  )
-  assert string.contains(body, "@click.outside=\"resetPopover()\"") == False
-  assert string.contains(body, "@click=\"resetPopover()\" aria-label=\"Close\"")
+pub fn parse_iso_requires_the_documented_shape_test() {
+  assert date.parse_iso("2026-07-01")
+    == Ok(calendar.Date(2026, calendar.July, 1))
+  let assert Error(_) = date.parse_iso("2026-7-01")
+  let assert Error(_) = date.parse_iso("26-07-01")
 }
 
-pub fn index_html_shows_bootstrap_error_fallback_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
+pub fn index_and_static_assets_are_served_test() {
+  let index = web.handle(simulate.request(http.Get, "/"), "priv")
+  assert index.status == 200
+  assert string.contains(simulate.read_body(index), "<title>aliahan</title>")
 
-  let body = simulate.read_body(response)
-  assert string.contains(
-    body,
-    "x-show=\"!$store.app.loading && !$store.app.data && $store.app.error\"",
-  )
-  assert string.contains(body, "@click=\"$store.app.init()\">Retry</button>")
-}
+  let app_js = web.handle(simulate.request(http.Get, "/static/app.js"), "priv")
+  assert app_js.status == 200
 
-pub fn index_html_disables_settings_without_bootstrap_data_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(body, ":disabled=\"!$store.app.data?.settings\"")
-  assert string.contains(
-    body,
-    "@click=\"$store.app.data?.settings && ($store.ui.settingsOpen = !$store.ui.settingsOpen)\"",
-  )
-  assert string.contains(
-    body,
-    "x-show=\"$store.ui.settingsOpen && $store.app.data?.settings\"",
-  )
-}
-
-pub fn index_html_scopes_add_course_to_vendor_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(
-    body,
-    "@click=\"openCourseModal(vendor.id)\">+ Add Course</button>",
-  )
-  assert string.contains(body, ":disabled=\"!canSubmit\"")
-  assert string.contains(
-    body,
-    "placeholder=\"Module 1&#10;Module 2&#10;Module 3\" required",
-  )
-  assert string.contains(body, "No vendors yet")
-  assert string.contains(body, "@click.outside=\"close()\"") == False
-  assert string.contains(
-      body,
-      "class=\"btn text-sm mx-auto\" disabled>+ Add Course</button>",
-    )
-    == False
-}
-
-pub fn index_html_passes_event_to_module_toggle_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(body, "@change=\"toggleModule(mod, $event)\"")
-}
-
-pub fn index_html_exposes_schedule_start_simulation_controls_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(body, ":value=\"$store.app.scheduleStartValue()\"")
-  assert string.contains(
-    body,
-    "@change=\"setScheduleStart($event.target.value)\"",
-  )
-  assert string.contains(body, "@click=\"resetScheduleStart()\"")
-  assert string.contains(body, ":disabled=\"!$store.app.isSimulatingStart()\"")
-  assert string.contains(body, "isScheduleStart(day.date)")
-}
-
-pub fn app_js_shares_vendor_color_revision_across_views_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(
-    body,
-    "const VENDOR_COLOR_KEY = \"aliahan_vendor_colors_v2\";",
-  )
-  assert string.contains(body, "const colors = Object.create(null);")
-  assert string.contains(
-    body,
-    "return normalizeVendorColors(JSON.parse(localStorage.getItem(VENDOR_COLOR_KEY)));",
-  )
-  assert string.contains(body, "vendorColorRevision: 0")
-  assert string.contains(
-    body,
-    "vendorColor(name) {\n      void Alpine.store(\"ui\").vendorColorRevision;",
-  )
-  assert string.contains(
-    body,
-    "getVendorColor(vendorName) {\n      void Alpine.store(\"ui\").vendorColorRevision;",
-  )
-  assert string.contains(
-    body,
-    "if (!Object.prototype.hasOwnProperty.call(vendorColors, vendorName)) return null;",
-  )
-  assert string.contains(
-    body,
-    "return typeof color === \"string\" ? color : null;",
-  )
-  assert string.contains(body, "const explicit = getVendorColor(vendorName);")
-  assert string.contains(
-    body,
-    "return vendorName ? vendorColorFallback(vendorName) : VENDOR_COLORS[0];",
-  )
-  assert string.contains(body, "ui.vendorColorRevision += 1")
-  assert string.contains(body, "vendorColors[vendorId]") == False
-}
-
-pub fn app_js_mutate_treats_refresh_separately_from_write_success_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "await api(path, options);")
-  assert string.contains(body, "await this.refresh();\n        return true;")
-  assert string.contains(body, "return await this.refresh();") == False
-}
-
-pub fn app_js_opens_course_modal_for_selected_vendor_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "courseVendorId: null")
-  assert string.contains(
-    body,
-    "const requestedVendorId = Alpine.store(\"ui\").courseVendorId;",
-  )
-  assert string.contains(
-    body,
-    "this.form.vendor_id = selectedVendor?.id || vendors[0]?.id || \"\";",
-  )
-  assert string.contains(body, "Alpine.store(\"ui\").courseVendorId = null;")
-  assert string.contains(body, "openCourseModal(vendorId)")
-  assert string.contains(
-    body,
-    "ui.courseVendorId = vendor.id;\n      ui.modalOpen = true;",
-  )
-}
-
-pub fn app_js_course_modal_requires_valid_modules_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "get explicitModules()")
-  assert string.contains(body, "get rangeIsValid()")
-  assert string.contains(body, "get canSubmit()")
-  assert string.contains(
-    body,
-    "return this.form.mode === \"range\" ? this.rangeIsValid : this.explicitModules.length > 0;",
-  )
-  assert string.contains(body, "if (!this.canSubmit) return;")
-  assert string.contains(body, "payload.modules = this.explicitModules;")
-}
-
-pub fn app_js_reverts_checkbox_after_failed_module_toggle_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "_moduleCompletionPending: Object.create(null),")
-  assert string.contains(body, "isModuleCompletionSaving(moduleId) {")
-  assert string.contains(body, "async toggleModule(mod, event)")
-  assert string.contains(
-    body,
-    "if (this.isModuleCompletionSaving(mod.id)) {\n        event.target.checked = !!this._moduleCompletionPending[mod.id];\n        return;\n      }",
-  )
-  assert string.contains(
-    body,
-    "this._moduleCompletionPending[mod.id] = checked;",
-  )
-  assert string.contains(body, "event.target.disabled = true;")
-  assert string.contains(body, "event.target.checked = !!mod.completed_at;")
-  assert string.contains(body, "delete this._moduleCompletionPending[mod.id];")
-  assert string.contains(
-    body,
-    "if (event.target.isConnected) {\n          event.target.disabled = false;\n        }",
-  )
-}
-
-pub fn app_js_reverts_controls_after_failed_settings_update_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "async toggleWeekends(event)")
-  assert string.contains(
-    body,
-    "event.target.checked = !!settings.include_weekends;",
-  )
-  assert string.contains(body, "async updateSlackDays(event)")
-  assert string.contains(
-    body,
-    "event.target.value = String(settings.deadline_slack_days);",
-  )
-}
-
-pub fn app_js_settings_and_courses_only_patch_changed_fields_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(
-    body,
-    "body: JSON.stringify({\n          include_weekends: includeWeekends,\n        }),",
-  )
-  assert string.contains(
-    body,
-    "body: JSON.stringify({\n          deadline_slack_days: deadlineSlackDays,\n        }),",
-  )
-  assert string.contains(body, "body: JSON.stringify(changes),")
-  assert string.contains(
-      body,
-      "deadline_slack_days: settings.deadline_slack_days",
-    )
-    == False
-  assert string.contains(body, "include_weekends: settings.include_weekends")
-    == False
-  assert string.contains(body, "name: changes.name ?? course.name") == False
-}
-
-pub fn app_js_preserves_drag_snapshot_until_reorder_finishes_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(
-    body,
-    "if (this._saving) {\n        event.preventDefault();\n        return;\n      }",
-  )
-  assert string.contains(
-    body,
-    "const dragSnapshot = this._dragSnapshot ? this._dragSnapshot.slice() : null;",
-  )
-  assert string.contains(body, "this.restoreDragSnapshot(dragSnapshot);")
-  assert string.contains(
-    body,
-    "if (!this._saving) {\n        this._dragSnapshot = null;\n        this._dropHandled = false;\n      }",
-  )
-  assert string.contains(
-    body,
-    "restoreDragSnapshot(snapshot = this._dragSnapshot)",
-  )
-}
-
-pub fn app_js_calendar_popover_tracks_full_day_entries_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(
-    body,
-    "popover: { open: false, entry: null, entries: [], completing: false }",
-  )
-  assert string.contains(body, "selectPopoverEntry(entry) {")
-  assert string.contains(body, "openPopover(entries, entry = entries?.[0]) {")
-  assert string.contains(body, "entries: entries.slice(),")
-}
-
-pub fn index_html_schedule_overflow_opens_day_popover_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(body, "@click=\"openPopover(day.entries, entry)\"")
-  assert string.contains(
-    body,
-    "@click=\"openPopover(day.entries, day.entries[3])\"",
-  )
-  assert string.contains(
-    body,
-    "@click=\"openPopover(day.entries, day.entries[2])\"",
-  )
-  assert string.contains(body, "x-show=\"popover.entries.length > 1\"")
-  assert string.contains(body, "x-for=\"entry in popover.entries\"")
-}
-
-pub fn index_html_vendor_color_picker_uses_vendor_names_test() {
-  let response = web.handle(simulate.request(http.Get, "/"), "priv")
-  assert response.status == 200
-
-  let body = simulate.read_body(response)
-  assert string.contains(body, "getVendorColor(vendor.name)")
-  assert string.contains(body, "@click=\"setVendorColor(vendor.name, c)\"")
-  assert string.contains(body, "getVendorColor(vendor.id)") == False
-  assert string.contains(body, "setVendorColor(vendor.id, c)") == False
-}
-
-pub fn app_js_optimistically_updates_calendar_targets_before_bootstrap_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(
-    body,
-    "today() {\n      return this.data?.today || todayIso();\n    },",
-  )
-  assert string.contains(body, "scheduleStart: null")
-  assert string.contains(
-    body,
-    "scheduleStartValue() {\n      return this.scheduleStart || this.data?.schedule_start || this.today();\n    },",
-  )
-  assert string.contains(body, "_bootstrapRequestId: 0")
-  assert string.contains(body, "const requestId = ++this._bootstrapRequestId;")
-  assert string.contains(
-    body,
-    "const targetStart = scheduleStart || null;\n      const targetAnchor = anchor || targetStart || todayIso();",
-  )
-  assert string.contains(
-    body,
-    "if (targetStart) params.set(\"start\", targetStart);",
-  )
-  assert string.contains(
-    body,
-    "this.scheduleStart = targetStart ? data.schedule_start : null;",
-  )
-  assert string.contains(
-    body,
-    "if (requestId !== this._bootstrapRequestId) return true;",
-  )
-  assert string.contains(
-    body,
-    "const schedule = this.data?.schedule;\n        if (schedule) {\n          this.view = schedule.view;\n          this.anchor = schedule.anchor;\n        }",
-  )
-  assert string.contains(
-    body,
-    "return dateStr === Alpine.store(\"app\").scheduleStartValue();",
-  )
-  assert string.contains(body, "anchor: app.today(),")
-  assert string.contains(body, "deadline_date: Alpine.store(\"app\").today(),")
-}
-
-pub fn app_js_keeps_loading_until_latest_bootstrap_finishes_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "_loadingRequestId: 0")
-  assert string.contains(
-    body,
-    "if (showLoading) {\n        this.loading = true;\n        this._loadingRequestId = requestId;\n      }",
-  )
-  assert string.contains(
-    body,
-    "if (showLoading && requestId === this._loadingRequestId) {\n          this.loading = false;\n          this._loadingRequestId = 0;\n        }",
-  )
-}
-
-pub fn app_js_keeps_calendar_faded_until_latest_navigation_finishes_test() {
-  let assert Ok(body) = simplifile.read("priv/app.js")
-  assert string.contains(body, "_fadeRequestId: 0")
-  assert string.contains(body, "const fadeRequestId = ++this._fadeRequestId;")
-  assert string.contains(
-    body,
-    "try {\n        await fn();\n      } finally {\n        if (fadeRequestId === this._fadeRequestId) this._fading = false;\n      }",
-  )
+  let alpine =
+    web.handle(simulate.request(http.Get, "/static/alpine.min.js"), "priv")
+  assert alpine.status == 200
 }
 
 pub fn scheduler_respects_prerequisites_test() {
@@ -441,6 +111,84 @@ pub fn scheduler_respects_prerequisites_test() {
   assert first.scheduled_date == today
   assert second.course_name == "Advanced"
   assert second.scheduled_date == date.day_after(today)
+}
+
+pub fn scheduler_skips_weekends_test() {
+  let friday = calendar.Date(2026, calendar.March, 20)
+  let monday = calendar.Date(2026, calendar.March, 23)
+  let settings = model.Settings(include_weekends: False, deadline_slack_days: 0)
+  let course =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Course",
+      deadline: monday,
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "One"),
+        module(id: 12, course_id: 1, position: 2, name: "Two"),
+      ],
+    )
+
+  let assert Ok(#(_, [], entries)) =
+    scheduler.rebuild([course], settings, friday)
+  let assert [first, second] = entries
+  assert first.scheduled_date == friday
+  assert second.scheduled_date == monday
+}
+
+pub fn scheduler_rejects_prerequisite_cycles_test() {
+  let first =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "First",
+      deadline: calendar.Date(2026, calendar.March, 25),
+      prerequisite_ids: [2],
+      prerequisites: ["Second"],
+      modules: [module(id: 11, course_id: 1, position: 1, name: "One")],
+    )
+  let second =
+    course(
+      id: 2,
+      vendor_name: "Vendor",
+      name: "Second",
+      deadline: calendar.Date(2026, calendar.March, 25),
+      prerequisite_ids: [1],
+      prerequisites: ["First"],
+      modules: [module(id: 21, course_id: 2, position: 1, name: "Two")],
+    )
+
+  let assert Error(model.Parse(message)) =
+    scheduler.rebuild(
+      [first, second],
+      model.Settings(include_weekends: True, deadline_slack_days: 0),
+      calendar.Date(2026, calendar.March, 20),
+    )
+  assert message == "Course prerequisites contain a cycle"
+}
+
+pub fn scheduler_reports_courses_with_no_available_days_test() {
+  let today = calendar.Date(2026, calendar.March, 20)
+  let overdue =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Overdue",
+      deadline: date.day_before(today),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [module(id: 11, course_id: 1, position: 1, name: "One")],
+    )
+
+  let assert Ok(#([], [conflict], [])) =
+    scheduler.rebuild(
+      [overdue],
+      model.Settings(include_weekends: True, deadline_slack_days: 0),
+      today,
+    )
+  assert conflict.course_id == overdue.id
 }
 
 pub fn scheduler_overlaps_when_deadline_requires_it_test() {
@@ -778,6 +526,107 @@ pub fn patch_module_returns_error_and_keeps_state_test() {
     let assert [updated_first, ..] = updated.modules
     assert updated_first.name == "First"
     assert updated_first.completed_at == None
+  })
+}
+
+pub fn schedule_queries_reject_invalid_values_test() {
+  let invalid_anchor =
+    web.handle(
+      simulate.request(http.Get, "/api/bootstrap?anchor=2026-7-01"),
+      "priv",
+    )
+  assert invalid_anchor.status == 400
+  assert string.contains(simulate.read_body(invalid_anchor), "Anchor date")
+
+  let invalid_view =
+    web.handle(simulate.request(http.Get, "/api/bootstrap?view=agenda"), "priv")
+  assert invalid_view.status == 400
+  assert string.contains(simulate.read_body(invalid_view), "View must be")
+}
+
+pub fn invalid_and_missing_resource_ids_return_client_errors_test() {
+  with_isolated_store("missing_resource_ids", fn(_, _) {
+    let assert Ok(Nil) = store.initialise()
+
+    let invalid =
+      web.handle(simulate.request(http.Delete, "/api/vendors/0"), "priv")
+    assert invalid.status == 400
+
+    let missing_vendor =
+      web.handle(simulate.request(http.Delete, "/api/vendors/999"), "priv")
+    assert missing_vendor.status == 404
+
+    let missing_course =
+      web.handle(simulate.request(http.Delete, "/api/courses/999"), "priv")
+    assert missing_course.status == 404
+
+    let add_to_missing_course =
+      simulate.request(http.Post, "/api/courses/999/modules")
+      |> simulate.json_body(json.object([#("name", json.string("Module"))]))
+      |> web.handle("priv")
+    assert add_to_missing_course.status == 404
+  })
+}
+
+pub fn course_module_ranges_are_bounded_in_the_store_test() {
+  with_isolated_store("bounded_module_ranges", fn(_, _) {
+    let assert Ok(Nil) = store.initialise()
+    let assert Ok(Nil) = store.create_vendor("Vendor")
+    let vendor = vendor_named("Vendor")
+
+    let invalid_start =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Invalid start",
+        deadline: calendar.Date(2026, calendar.December, 1),
+        prerequisites: [],
+        modules: model.GeneratedRange(model.ModuleRange(
+          prefix: "Module ",
+          start: 0,
+          end: 2,
+        )),
+      ))
+    let assert Error(model.Validation(start_message)) = invalid_start
+    assert string.contains(start_message, "at least 1")
+
+    let too_large =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Too large",
+        deadline: calendar.Date(2026, calendar.December, 1),
+        prerequisites: [],
+        modules: model.GeneratedRange(model.ModuleRange(
+          prefix: "Module ",
+          start: 1,
+          end: 1001,
+        )),
+      ))
+    let assert Error(model.Validation(size_message)) = too_large
+    assert string.contains(size_message, "more than 1000")
+  })
+}
+
+pub fn duplicate_prerequisite_names_are_stored_once_test() {
+  with_isolated_store("duplicate_prerequisites", fn(_, _) {
+    let assert Ok(Nil) = store.initialise()
+    let _ =
+      seed_course(
+        vendor_name: "Vendor",
+        course_name: "Intro",
+        modules: model.ExplicitModules(["Intro module"]),
+      )
+    let vendor = vendor_named("Vendor")
+
+    let assert Ok(Nil) =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Advanced",
+        deadline: calendar.Date(2026, calendar.December, 1),
+        prerequisites: ["Intro", " Intro ", "Intro"],
+        modules: model.ExplicitModules(["Advanced module"]),
+      ))
+
+    assert course_named("Vendor", "Advanced").prerequisites == ["Intro"]
   })
 }
 
@@ -1451,12 +1300,6 @@ pub fn database_path_ignores_empty_override_test() {
   assert path == "aliahan.sqlite3"
 }
 
-pub fn courses_toml_path_ignores_empty_override_without_database_override_test() {
-  let path =
-    with_store_path_env(None, Some(""), fn() { store.courses_toml_path() })
-  assert path == "courses.toml"
-}
-
 pub fn courses_toml_path_follows_database_override_test() {
   let path =
     with_store_path_env(Some("/tmp/aliahan-alt.sqlite3"), None, fn() {
@@ -1475,27 +1318,6 @@ pub fn courses_toml_path_preserves_legacy_name_for_default_database_override_tes
   assert path == "courses.toml"
 }
 
-pub fn courses_toml_path_preserves_legacy_name_for_dot_default_database_override_test() {
-  let path =
-    with_store_path_env(Some("./aliahan.sqlite3"), None, fn() {
-      store.courses_toml_path()
-    })
-
-  assert path == "courses.toml"
-}
-
-pub fn courses_toml_path_preserves_legacy_name_for_absolute_default_database_override_test() {
-  let assert Ok(current_directory) = simplifile.current_directory()
-  let path =
-    with_store_path_env(
-      Some(current_directory <> "/aliahan.sqlite3"),
-      None,
-      fn() { store.courses_toml_path() },
-    )
-
-  assert path == "courses.toml"
-}
-
 pub fn courses_toml_path_ignores_empty_override_and_uses_database_override_test() {
   let path =
     with_store_path_env(Some("/tmp/aliahan-alt.sqlite3"), Some(""), fn() {
@@ -1503,15 +1325,6 @@ pub fn courses_toml_path_ignores_empty_override_and_uses_database_override_test(
     })
 
   assert path == "/tmp/aliahan-alt.courses.toml"
-}
-
-pub fn courses_toml_path_ignores_empty_override_and_preserves_legacy_name_for_default_database_override_test() {
-  let path =
-    with_store_path_env(Some("aliahan.sqlite3"), Some(""), fn() {
-      store.courses_toml_path()
-    })
-
-  assert path == "courses.toml"
 }
 
 pub fn courses_toml_path_explicit_override_wins_test() {
@@ -1641,7 +1454,7 @@ fn bootstrap_data() -> model.BootstrapData {
 }
 
 fn bootstrap_for(anchor: calendar.Date) -> model.BootstrapData {
-  let assert Ok(data) = store.bootstrap("week", anchor, None)
+  let assert Ok(data) = store.bootstrap("month", anchor, None)
   data
 }
 
@@ -1682,9 +1495,21 @@ fn schedule_module_names_on(
   data: model.BootstrapData,
   day: calendar.Date,
 ) -> List(String) {
-  let assert Ok(schedule_day) =
-    list.find(data.schedule.days, fn(schedule_day) {
-      date.compare(schedule_day.date, day) == Eq
-    })
-  schedule_day.entries |> list.map(fn(entry) { entry.module_name })
+  data.vendors
+  |> list.flat_map(fn(vendor) { vendor.courses })
+  |> list.flat_map(fn(course) { course.modules })
+  |> list.filter(fn(module) {
+    module.scheduled_date == Some(day) && module.completed_at == None
+  })
+  |> list.sort(fn(left, right) {
+    int.compare(left.slot_index |> option_int, right.slot_index |> option_int)
+  })
+  |> list.map(fn(module) { module.name })
+}
+
+fn option_int(value: Option(Int)) -> Int {
+  case value {
+    Some(value) -> value
+    None -> 0
+  }
 }

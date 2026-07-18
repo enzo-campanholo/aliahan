@@ -57,20 +57,30 @@ pub fn to_iso(date: calendar.Date) -> String {
 
 pub fn parse_iso(input: String) -> Result(calendar.Date, AppError) {
   case string.split(input, on: "-") {
-    [year, month, day] -> {
-      use year <- result.try(parse_part(year, "Invalid year in date"))
-      use month <- result.try(parse_part(month, "Invalid month in date"))
-      use day <- result.try(parse_part(day, "Invalid day in date"))
-      use month <- result.try(
-        calendar.month_from_int(month)
-        |> result.map_error(fn(_) { Parse("Invalid month in date: " <> input) }),
-      )
-      let date = calendar.Date(year:, month:, day:)
-      case calendar.is_valid_date(date) {
-        True -> Ok(date)
-        False -> Error(Parse("Invalid date: " <> input))
+    [year, month, day] ->
+      case
+        string.length(year) == 4
+        && string.length(month) == 2
+        && string.length(day) == 2
+      {
+        False -> Error(Parse("Expected YYYY-MM-DD date"))
+        True -> {
+          use year <- result.try(parse_part(year, "Invalid year in date"))
+          use month <- result.try(parse_part(month, "Invalid month in date"))
+          use day <- result.try(parse_part(day, "Invalid day in date"))
+          use month <- result.try(
+            calendar.month_from_int(month)
+            |> result.map_error(fn(_) {
+              Parse("Invalid month in date: " <> input)
+            }),
+          )
+          let date = calendar.Date(year:, month:, day:)
+          case calendar.is_valid_date(date) {
+            True -> Ok(date)
+            False -> Error(Parse("Invalid date: " <> input))
+          }
+        }
       }
-    }
     _ -> Error(Parse("Expected YYYY-MM-DD date"))
   }
 }
@@ -132,16 +142,6 @@ pub fn end_of_month(date: calendar.Date) -> calendar.Date {
     month: date.month,
     day: days_in_month(date.year, date.month),
   )
-}
-
-pub fn shift_months(date: calendar.Date, amount: Int) -> calendar.Date {
-  let absolute_month = calendar.month_to_int(date.month) + amount - 1
-  let year_shift = floor_div(absolute_month, 12)
-  let month_index = modulo(absolute_month, 12) + 1
-  let assert Ok(month) = calendar.month_from_int(month_index)
-  let year = date.year + year_shift
-  let day = min_int(date.day, days_in_month(year, month))
-  calendar.Date(year:, month:, day:)
 }
 
 pub fn weekday_number(date: calendar.Date) -> Int {
@@ -208,30 +208,11 @@ fn first(pair: #(a, b)) -> a {
   value
 }
 
-fn floor_div(left: Int, right: Int) -> Int {
-  case left >= 0 {
-    True -> left / right
-    False -> {
-      let positive = -left
-      let adjusted = positive + right - 1
-      let rounded = adjusted / right
-      0 - rounded
-    }
-  }
-}
-
 fn modulo(left: Int, right: Int) -> Int {
   let result = left % right
   case result < 0 {
     True -> result + right
     False -> result
-  }
-}
-
-fn min_int(left: Int, right: Int) -> Int {
-  case int.compare(left, right) {
-    Gt -> right
-    _ -> left
   }
 }
 

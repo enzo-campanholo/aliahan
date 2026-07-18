@@ -598,9 +598,6 @@
   .overflow-y-auto {
     overflow-y: auto;
   }
-  .rounded {
-    border-radius: 0.25rem;
-  }
   .border-2 {
     border-style: var(--tw-border-style);
     border-width: 2px;

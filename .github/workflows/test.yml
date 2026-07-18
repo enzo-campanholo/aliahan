@@ -18,6 +18,19 @@ jobs:
           gleam-version: "1.15.1"
           rebar3-version: "3"
           # elixir-version: "1"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
       - run: gleam deps download
+      - run: gleam check
       - run: gleam test
       - run: gleam format --check src test
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:js
+      - run: pnpm run build:css
+      - run: pnpm run vendor:alpine
+      - run: git diff --exit-code -- priv/app.css priv/alpine.min.js
