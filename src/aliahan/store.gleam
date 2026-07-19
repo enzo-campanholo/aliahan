@@ -4,11 +4,13 @@ import aliahan/env
 import aliahan/model.{
   type AppError, type BootstrapData, type Conflict, type Course,
   type CourseModulesInput, type Module, type ModuleRange, type NewCourseInput,
-  type ScheduleEntry, type ScheduleView, type Settings, type SettingsPatch,
-  type UpdateCourseInput, type Vendor, BootstrapData, Course, Database,
-  ExplicitModules, GeneratedRange, IOError, Module, ModuleRange, NotFound,
-  ScheduleDay, ScheduleEntry, ScheduleView, Settings, Validation, Vendor,
+  type ScheduleEntry, type ScheduleView, type SchedulerEngine, type Settings,
+  type SettingsPatch, type UpdateCourseInput, type Vendor, BootstrapData, Course,
+  Database, ExplicitModules, GeneratedRange, GleamScheduler, IOError, Module,
+  ModuleRange, NotFound, PrologScheduler, ScheduleDay, ScheduleEntry,
+  ScheduleView, Settings, Validation, Vendor,
 }
+import aliahan/prolog_scheduler
 import aliahan/scheduler
 import filepath
 import gleam/dict
@@ -87,28 +89,20 @@ pub fn bootstrap(
   anchor: calendar.Date,
   schedule_start: Option(calendar.Date),
 ) -> Result(BootstrapData, AppError) {
+  bootstrap_with_scheduler(view, anchor, schedule_start, GleamScheduler)
+}
+
+pub fn bootstrap_with_scheduler(
+  view: String,
+  anchor: calendar.Date,
+  schedule_start: Option(calendar.Date),
+  engine: SchedulerEngine,
+) -> Result(BootstrapData, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(enable_foreign_keys(connection))
     let today = date.today()
-    case schedule_start {
-      Some(schedule_start) -> {
-        use settings <- result.try(load_settings(connection))
-        use courses <- result.try(load_courses(connection))
-        use #(stored_entries, conflicts, schedule_entries) <- result.try(
-          scheduler.rebuild(courses, settings, schedule_start),
-        )
-        use vendors <- result.try(load_vendors(connection))
-        let schedule = build_schedule_view(schedule_entries, view, anchor)
-        Ok(BootstrapData(
-          today: today,
-          schedule_start: schedule_start,
-          settings: settings,
-          vendors: decorate_vendors_with_schedule(vendors, stored_entries),
-          conflicts: conflicts,
-          schedule: schedule,
-        ))
-      }
-      None -> {
+    case engine, schedule_start {
+      GleamScheduler, None -> {
         use #(conflicts, schedule_entries) <- result.try(transactional(
           connection,
           ensure_schedule_in_transaction,
@@ -125,6 +119,24 @@ pub fn bootstrap(
           schedule: schedule,
         ))
       }
+      engine, start -> {
+        let schedule_start = option.unwrap(start, today)
+        use settings <- result.try(load_settings(connection))
+        use courses <- result.try(load_courses(connection))
+        use #(stored_entries, conflicts, schedule_entries) <- result.try(
+          rebuild_with_scheduler(courses, settings, schedule_start, engine),
+        )
+        use vendors <- result.try(load_vendors(connection))
+        let schedule = build_schedule_view(schedule_entries, view, anchor)
+        Ok(BootstrapData(
+          today: today,
+          schedule_start: schedule_start,
+          settings: settings,
+          vendors: decorate_vendors_with_schedule(vendors, stored_entries),
+          conflicts: conflicts,
+          schedule: schedule,
+        ))
+      }
     }
   })
 }
@@ -134,23 +146,34 @@ pub fn schedule_view(
   anchor: calendar.Date,
   schedule_start: Option(calendar.Date),
 ) -> Result(ScheduleView, AppError) {
+  schedule_view_with_scheduler(view, anchor, schedule_start, GleamScheduler)
+}
+
+pub fn schedule_view_with_scheduler(
+  view: String,
+  anchor: calendar.Date,
+  schedule_start: Option(calendar.Date),
+  engine: SchedulerEngine,
+) -> Result(ScheduleView, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(enable_foreign_keys(connection))
-    case schedule_start {
-      Some(schedule_start) -> {
-        use settings <- result.try(load_settings(connection))
-        use courses <- result.try(load_courses(connection))
-        use #(_, _, schedule_entries) <- result.try(scheduler.rebuild(
-          courses,
-          settings,
-          schedule_start,
-        ))
-        Ok(build_schedule_view(schedule_entries, view, anchor))
-      }
-      None -> {
+    case engine, schedule_start {
+      GleamScheduler, None -> {
         use #(_, schedule_entries) <- result.try(transactional(
           connection,
           ensure_schedule_in_transaction,
+        ))
+        Ok(build_schedule_view(schedule_entries, view, anchor))
+      }
+      engine, start -> {
+        let schedule_start = option.unwrap(start, date.today())
+        use settings <- result.try(load_settings(connection))
+        use courses <- result.try(load_courses(connection))
+        use #(_, _, schedule_entries) <- result.try(rebuild_with_scheduler(
+          courses,
+          settings,
+          schedule_start,
+          engine,
         ))
         Ok(build_schedule_view(schedule_entries, view, anchor))
       }
@@ -634,6 +657,21 @@ fn compute_schedule(
   use settings <- result.try(load_settings(connection))
   use courses <- result.try(load_courses(connection))
   scheduler.rebuild(courses, settings, today)
+}
+
+fn rebuild_with_scheduler(
+  courses: List(Course),
+  settings: Settings,
+  today: calendar.Date,
+  engine: SchedulerEngine,
+) -> Result(
+  #(List(scheduler.StoredEntry), List(Conflict), List(ScheduleEntry)),
+  AppError,
+) {
+  case engine {
+    GleamScheduler -> scheduler.rebuild(courses, settings, today)
+    PrologScheduler -> prolog_scheduler.rebuild(courses, settings, today)
+  }
 }
 
 fn persist_schedule_entries(

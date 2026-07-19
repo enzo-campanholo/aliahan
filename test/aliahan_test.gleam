@@ -2,10 +2,12 @@ import aliahan/config
 import aliahan/date
 import aliahan/env
 import aliahan/model
+import aliahan/prolog_scheduler
 import aliahan/scheduler
 import aliahan/store
 import aliahan/web
 import gleam/http
+import gleam/http/response as http_response
 import gleam/int
 import gleam/json
 import gleam/list
@@ -66,7 +68,10 @@ pub fn parse_iso_requires_the_documented_shape_test() {
 pub fn index_and_static_assets_are_served_test() {
   let index = web.handle(simulate.request(http.Get, "/"), "priv")
   assert index.status == 200
-  assert string.contains(simulate.read_body(index), "<title>aliahan</title>")
+  let index_body = simulate.read_body(index)
+  assert string.contains(index_body, "<title>aliahan</title>")
+  assert string.contains(index_body, "setScheduler('gleam')")
+  assert string.contains(index_body, "setScheduler('prolog')")
 
   let app_js = web.handle(simulate.request(http.Get, "/static/app.js"), "priv")
   assert app_js.status == 200
@@ -110,6 +115,41 @@ pub fn scheduler_respects_prerequisites_test() {
   assert first.course_name == "Intro"
   assert first.scheduled_date == today
   assert second.course_name == "Advanced"
+  assert second.scheduled_date == date.day_after(today)
+}
+
+pub fn prolog_scheduler_respects_prerequisites_test() {
+  let today = calendar.Date(2026, calendar.March, 19)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 0)
+  let intro =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Intro",
+      deadline: calendar.Date(2026, calendar.March, 25),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [module(id: 11, course_id: 1, position: 1, name: "Intro 1")],
+    )
+  let advanced =
+    course(
+      id: 2,
+      vendor_name: "Vendor",
+      name: "Advanced",
+      deadline: calendar.Date(2026, calendar.March, 25),
+      prerequisite_ids: [1],
+      prerequisites: ["Intro"],
+      modules: [
+        module(id: 21, course_id: 2, position: 1, name: "Advanced 1"),
+      ],
+    )
+
+  let assert Ok(#(_, [], entries)) =
+    prolog_scheduler.rebuild([intro, advanced], settings, today)
+  let assert [first, second] = entries
+  assert first.module_id == 11
+  assert first.scheduled_date == today
+  assert second.module_id == 21
   assert second.scheduled_date == date.day_after(today)
 }
 
@@ -542,6 +582,24 @@ pub fn schedule_queries_reject_invalid_values_test() {
     web.handle(simulate.request(http.Get, "/api/bootstrap?view=agenda"), "priv")
   assert invalid_view.status == 400
   assert string.contains(simulate.read_body(invalid_view), "View must be")
+
+  let invalid_scheduler =
+    web.handle(
+      simulate.request(http.Get, "/api/bootstrap?scheduler=other"),
+      "priv",
+    )
+  assert invalid_scheduler.status == 400
+  assert string.contains(
+    simulate.read_body(invalid_scheduler),
+    "Scheduler must be gleam or prolog",
+  )
+
+  let invalid_schedule_scheduler =
+    web.handle(
+      simulate.request(http.Get, "/api/schedule?scheduler=other"),
+      "priv",
+    )
+  assert invalid_schedule_scheduler.status == 400
 }
 
 pub fn invalid_and_missing_resource_ids_return_client_errors_test() {
@@ -724,6 +782,104 @@ pub fn completing_todays_module_keeps_today_blank_across_reads_and_name_patch_te
   )
 }
 
+pub fn completing_module_refreshes_prolog_preview_test() {
+  with_isolated_store("completing_module_refreshes_prolog_preview", fn(_, _) {
+    let today = date.today()
+
+    let assert Ok(Nil) = store.initialise()
+    let assert Ok(Nil) =
+      store.set_settings(model.SettingsPatch(
+        include_weekends: Some(True),
+        deadline_slack_days: None,
+      ))
+    let assert Ok(Nil) = store.create_vendor("Vendor")
+    let vendor = vendor_named("Vendor")
+    let assert Ok(Nil) =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Prolog completion",
+        deadline: date.day_after(today),
+        prerequisites: [],
+        modules: model.ExplicitModules(["First", "Second"]),
+      ))
+
+    let assert Ok(before) =
+      store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
+    assert schedule_module_names_on(before, today) == ["First"]
+    let course = course_named("Vendor", "Prolog completion")
+    let assert [first, _] = course.modules
+
+    let assert Ok(Nil) = store.set_module_completed(first.id, True)
+
+    let assert Ok(after) =
+      store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
+    assert schedule_module_names_on(after, today) == ["Second"]
+  })
+}
+
+pub fn prolog_preview_reports_each_blocked_course_and_keeps_feasible_work_test() {
+  with_isolated_store(
+    "prolog_preview_reports_conflicts_and_keeps_feasible_work",
+    fn(_, _) {
+      let today = date.today()
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Elapsed",
+          deadline: date.day_before(today),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Old"]),
+        ))
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Blocked",
+          deadline: date.day_after(today),
+          prerequisites: ["Elapsed"],
+          modules: model.ExplicitModules(["Next"]),
+        ))
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Transitively blocked",
+          deadline: date.add_days(today, 2),
+          prerequisites: ["Blocked"],
+          modules: model.ExplicitModules(["Last"]),
+        ))
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Feasible",
+          deadline: today,
+          prerequisites: [],
+          modules: model.ExplicitModules(["Current"]),
+        ))
+
+      let assert Ok(preview) =
+        store.bootstrap_with_scheduler(
+          "week",
+          today,
+          None,
+          model.PrologScheduler,
+        )
+
+      assert preview.conflicts
+        |> list.map(fn(conflict) { conflict.course_name })
+        == ["Elapsed", "Blocked", "Transitively blocked"]
+      assert schedule_module_names_on(preview, today) == ["Current"]
+    },
+  )
+}
+
 pub fn completing_non_today_module_rebuilds_and_unblocks_future_work_test() {
   with_isolated_store(
     "completing_non_today_module_rebuilds_and_unblocks_future_work",
@@ -869,6 +1025,46 @@ pub fn bootstrap_can_preview_schedule_from_custom_start_without_persisting_test(
   )
 }
 
+pub fn prolog_preview_does_not_replace_the_stored_gleam_schedule_test() {
+  with_isolated_store(
+    "prolog_preview_does_not_replace_stored_gleam_schedule",
+    fn(_, _) {
+      let today = date.today()
+      let simulated_start = date.day_after(today)
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Prolog preview",
+          deadline: date.add_days(today, 5),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Only"]),
+        ))
+
+      let assert Ok(preview) =
+        store.bootstrap_with_scheduler(
+          "week",
+          simulated_start,
+          Some(simulated_start),
+          model.PrologScheduler,
+        )
+      assert schedule_module_names_on(preview, simulated_start) == ["Only"]
+
+      let persisted = course_named("Vendor", "Prolog preview")
+      let assert [persisted_module] = persisted.modules
+      assert persisted_module.scheduled_date == Some(today)
+    },
+  )
+}
+
 pub fn bootstrap_start_query_returns_preview_schedule_test() {
   with_isolated_store(
     "bootstrap_start_query_returns_preview_schedule",
@@ -907,9 +1103,70 @@ pub fn bootstrap_start_query_returns_preview_schedule_test() {
         )
 
       assert response.status == 200
+      assert http_response.get_header(response, "cache-control")
+        == Ok("no-store")
       let body = simulate.read_body(response)
       assert string.contains(body, "\"schedule_start\":\"" <> start_iso <> "\"")
       assert string.contains(body, "\"scheduled_date\":\"" <> start_iso <> "\"")
+    },
+  )
+}
+
+pub fn bootstrap_prolog_scheduler_query_returns_preview_test() {
+  with_isolated_store(
+    "bootstrap_prolog_scheduler_query_returns_preview",
+    fn(_, _) {
+      let today = date.today()
+      let today_iso = date.to_iso(today)
+
+      let assert Ok(Nil) = store.initialise()
+      let assert Ok(Nil) =
+        store.set_settings(model.SettingsPatch(
+          include_weekends: Some(True),
+          deadline_slack_days: None,
+        ))
+      let assert Ok(Nil) = store.create_vendor("Vendor")
+      let vendor = vendor_named("Vendor")
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Prolog Preview",
+          deadline: date.add_days(today, 5),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Only"]),
+        ))
+
+      let response =
+        web.handle(
+          simulate.request(
+            http.Get,
+            "/api/bootstrap?view=week&anchor="
+              <> today_iso
+              <> "&scheduler=prolog",
+          ),
+          "priv",
+        )
+
+      assert response.status == 200
+      let body = simulate.read_body(response)
+      assert string.contains(body, "Prolog Preview")
+      assert string.contains(body, "\"scheduled_date\":\"" <> today_iso <> "\"")
+
+      let schedule_response =
+        web.handle(
+          simulate.request(
+            http.Get,
+            "/api/schedule?view=week&anchor="
+              <> today_iso
+              <> "&scheduler=prolog",
+          ),
+          "priv",
+        )
+      assert schedule_response.status == 200
+      assert string.contains(
+        simulate.read_body(schedule_response),
+        "Prolog Preview",
+      )
     },
   )
 }

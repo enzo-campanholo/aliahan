@@ -5,6 +5,7 @@
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "content-type": "application/json", ...(options.headers || {}) },
+    cache: "no-store",
     ...options,
   });
   const body = await response.text();
@@ -41,6 +42,24 @@ function shiftAnchor(anchor, view, delta) {
     d.setDate(d.getDate() + delta * 7);
   }
   return localDateIso(d);
+}
+
+const SCHEDULER_KEY = "aliahan_scheduler_v1";
+
+function loadScheduler() {
+  try {
+    return localStorage.getItem(SCHEDULER_KEY) === "prolog" ? "prolog" : "gleam";
+  } catch {
+    return "gleam";
+  }
+}
+
+function saveScheduler(value) {
+  try {
+    localStorage.setItem(SCHEDULER_KEY, value);
+  } catch {
+    // The toggle still works for this page load when storage is unavailable.
+  }
 }
 
 // Vendor color palette and persistence
@@ -139,6 +158,7 @@ document.addEventListener("alpine:init", () => {
     view: "week",
     anchor: null,
     scheduleStart: null,
+    scheduler: loadScheduler(),
     loading: false,
     error: "",
     _bootstrapRequestId: 0,
@@ -161,6 +181,7 @@ document.addEventListener("alpine:init", () => {
       view = this.view,
       anchor = this.anchor || this.scheduleStartValue(),
       scheduleStart = this.scheduleStart,
+      scheduler = this.scheduler,
     } = {}) {
       const requestId = ++this._bootstrapRequestId;
       const previousScheduleStart = this.scheduleStart;
@@ -178,6 +199,7 @@ document.addEventListener("alpine:init", () => {
         const params = new URLSearchParams({
           view,
           anchor: targetAnchor,
+          scheduler,
         });
         if (targetStart) params.set("start", targetStart);
         const data = await api(`/api/bootstrap?${params}`);
@@ -219,6 +241,7 @@ document.addEventListener("alpine:init", () => {
       return await this.loadBootstrap({
         view: this.view,
         anchor: this.anchor || this.scheduleStartValue(),
+        scheduler: this.scheduler,
       });
     },
 
@@ -237,6 +260,24 @@ document.addEventListener("alpine:init", () => {
         anchor: this.today(),
         scheduleStart: null,
       });
+    },
+
+    async setScheduler(value) {
+      if (!["gleam", "prolog"].includes(value) || value === this.scheduler) {
+        return true;
+      }
+      const previous = this.scheduler;
+      this.scheduler = value;
+      saveScheduler(value);
+      const ok = await this.loadBootstrap({
+        view: this.view,
+        anchor: this.anchor || this.scheduleStartValue(),
+      });
+      if (!ok) {
+        this.scheduler = previous;
+        saveScheduler(previous);
+      }
+      return ok;
     },
 
     async mutate(path, options) {
@@ -404,6 +445,13 @@ document.addEventListener("alpine:init", () => {
       this.resetPopover();
       this._withFade(async () => {
         await Alpine.store("app").resetScheduleStart();
+      });
+    },
+
+    setScheduler(value) {
+      this.resetPopover();
+      this._withFade(async () => {
+        await Alpine.store("app").setScheduler(value);
       });
     },
 

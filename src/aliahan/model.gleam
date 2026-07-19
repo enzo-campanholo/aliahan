@@ -57,6 +57,11 @@ pub type Settings {
   Settings(include_weekends: Bool, deadline_slack_days: Int)
 }
 
+pub type SchedulerEngine {
+  GleamScheduler
+  PrologScheduler
+}
+
 pub type Module {
   Module(
     id: Int,

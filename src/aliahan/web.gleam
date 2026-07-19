@@ -45,27 +45,27 @@ pub fn handle(request: wisp.Request, priv_dir: String) -> wisp.Response {
 }
 
 fn handle_bootstrap(request: wisp.Request) -> wisp.Response {
-  handle_schedule_query(request, fn(view, anchor, schedule_start) {
-    store.bootstrap(view, anchor, schedule_start)
+  handle_schedule_query(request, fn(view, anchor, schedule_start, engine) {
+    store.bootstrap_with_scheduler(view, anchor, schedule_start, engine)
     |> result.map(encode_bootstrap)
   })
 }
 
 fn handle_schedule(request: wisp.Request) -> wisp.Response {
-  handle_schedule_query(request, fn(view, anchor, schedule_start) {
-    store.schedule_view(view, anchor, schedule_start)
+  handle_schedule_query(request, fn(view, anchor, schedule_start, engine) {
+    store.schedule_view_with_scheduler(view, anchor, schedule_start, engine)
     |> result.map(encode_schedule)
   })
 }
 
 fn handle_schedule_query(
   request: wisp.Request,
-  load: fn(String, calendar.Date, Option(calendar.Date)) ->
+  load: fn(String, calendar.Date, Option(calendar.Date), model.SchedulerEngine) ->
     Result(json.Json, model.AppError),
 ) -> wisp.Response {
   case request_schedule(request) {
-    Ok(#(view, anchor, schedule_start)) ->
-      case load(view, anchor, schedule_start) {
+    Ok(#(view, anchor, schedule_start, engine)) ->
+      case load(view, anchor, schedule_start, engine) {
         Ok(payload) -> json_ok(payload)
         Error(error) -> app_error(error)
       }
@@ -179,7 +179,10 @@ fn mutation_response(outcome: Result(Nil, model.AppError)) -> wisp.Response {
 
 fn request_schedule(
   request: wisp.Request,
-) -> Result(#(String, calendar.Date, Option(calendar.Date)), String) {
+) -> Result(
+  #(String, calendar.Date, Option(calendar.Date), model.SchedulerEngine),
+  String,
+) {
   let query = wisp.get_query(request)
   use view <- result.try(view_query(query))
   use anchor <- result.try(date_query(
@@ -193,7 +196,18 @@ fn request_schedule(
     "start",
     "Start date",
   ))
-  Ok(#(view, anchor, schedule_start))
+  use engine <- result.try(scheduler_query(query))
+  Ok(#(view, anchor, schedule_start, engine))
+}
+
+fn scheduler_query(
+  query: List(#(String, String)),
+) -> Result(model.SchedulerEngine, String) {
+  case list.key_find(query, "scheduler") {
+    Error(_) | Ok("gleam") -> Ok(model.GleamScheduler)
+    Ok("prolog") -> Ok(model.PrologScheduler)
+    Ok(_) -> Error("Scheduler must be gleam or prolog")
+  }
 }
 
 fn view_query(query: List(#(String, String))) -> Result(String, String) {
@@ -425,6 +439,7 @@ fn json_ok(payload: json.Json) -> wisp.Response {
     ),
     200,
   )
+  |> wisp.set_header("cache-control", "no-store")
 }
 
 fn encode_bootstrap(data: model.BootstrapData) -> json.Json {
@@ -789,6 +804,22 @@ fn index_html() -> String {
 
         <!-- Calendar toolbar -->
         <div class=\"flex flex-wrap items-center gap-4 mb-4 shrink-0\">
+          <div class=\"flex items-center gap-2\">
+            <span class=\"text-sm font-heading font-bold\">Scheduler</span>
+            <div class=\"flex border-3 border-ink\">
+              <button
+                class=\"px-4 py-1.5 font-heading font-bold text-sm cursor-pointer transition-[background-color,color] duration-100\"
+                :class=\"$store.app.scheduler === 'gleam' ? 'bg-ink text-surface' : 'bg-surface text-ink'\"
+                @click=\"setScheduler('gleam')\"
+              >Gleam</button>
+              <button
+                class=\"px-4 py-1.5 font-heading font-bold text-sm border-l-3 border-ink cursor-pointer transition-[background-color,color] duration-100\"
+                :class=\"$store.app.scheduler === 'prolog' ? 'bg-ink text-surface' : 'bg-surface text-ink'\"
+                @click=\"setScheduler('prolog')\"
+              >Prolog</button>
+            </div>
+          </div>
+
           <div class=\"flex border-3 border-ink\">
             <button
               class=\"px-4 py-1.5 font-heading font-bold text-sm cursor-pointer transition-[background-color,color] duration-100\"
