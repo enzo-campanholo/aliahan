@@ -13,7 +13,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/order.{Lt}
+import gleam/order.{Gt, Lt}
 import gleam/string
 import gleam/time/calendar
 import gleeunit
@@ -286,17 +286,19 @@ pub fn scheduler_spreads_required_overlaps_across_available_days_test() {
     scheduler.rebuild([packed], settings, today)
 
   assert conflicts == []
+  // The slack window (deadline minus two days) is a hard bound: all eight
+  // modules must fit on the three days up to 2026-03-21.
   let scheduled_dates = entries |> list.map(fn(entry) { entry.scheduled_date })
   assert scheduled_dates
     == [
       today,
       today,
+      today,
+      today,
+      date.day_after(today),
       date.day_after(today),
       date.day_after(today),
       date.add_days(today, 2),
-      date.add_days(today, 2),
-      date.add_days(today, 3),
-      date.add_days(today, 4),
     ]
 }
 
@@ -467,7 +469,7 @@ pub fn scheduler_prefers_finishing_before_deadline_test() {
 
 pub fn scheduler_can_use_deadline_day_when_needed_test() {
   let today = calendar.Date(2026, calendar.March, 19)
-  let settings = model.Settings(include_weekends: True, deadline_slack_days: 1)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 5)
 
   let urgent =
     course(
@@ -490,6 +492,178 @@ pub fn scheduler_can_use_deadline_day_when_needed_test() {
   let assert [first, second] = entries
   assert first.scheduled_date == today
   assert second.scheduled_date == calendar.Date(2026, calendar.March, 20)
+}
+
+pub fn scheduler_finishes_by_slack_deadline_when_stacking_is_needed_test() {
+  let today = calendar.Date(2026, calendar.July, 19)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 3)
+
+  let tight =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Tight",
+      deadline: calendar.Date(2026, calendar.July, 29),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "T1"),
+        module(id: 12, course_id: 1, position: 2, name: "T2"),
+        module(id: 13, course_id: 1, position: 3, name: "T3"),
+        module(id: 14, course_id: 1, position: 4, name: "T4"),
+        module(id: 15, course_id: 1, position: 5, name: "T5"),
+        module(id: 16, course_id: 1, position: 6, name: "T6"),
+        module(id: 17, course_id: 1, position: 7, name: "T7"),
+        module(id: 18, course_id: 1, position: 8, name: "T8"),
+        module(id: 19, course_id: 1, position: 9, name: "T9"),
+        module(id: 20, course_id: 1, position: 10, name: "T10"),
+        module(id: 21, course_id: 1, position: 11, name: "T11"),
+        module(id: 22, course_id: 1, position: 12, name: "T12"),
+      ],
+    )
+
+  let assert Ok(#(_, conflicts, entries)) =
+    scheduler.rebuild([tight], settings, today)
+
+  assert conflicts == []
+  assert list.length(entries) == 12
+  // Twelve modules on eight allowed days: the course must still finish by
+  // deadline minus slack (2026-07-26), stacking modules instead of spreading
+  // up to the true deadline.
+  let preferred_deadline = calendar.Date(2026, calendar.July, 26)
+  assert list.all(entries, fn(entry) {
+    date.compare(entry.scheduled_date, preferred_deadline) != Gt
+  })
+  assert list.any(entries, fn(entry) { entry.slot_index > 0 })
+}
+
+pub fn scheduler_stacks_to_meet_slack_deadline_in_a_tiny_window_test() {
+  let today = calendar.Date(2026, calendar.March, 19)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 1)
+
+  let urgent =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Urgent",
+      deadline: calendar.Date(2026, calendar.March, 20),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "U1"),
+        module(id: 12, course_id: 1, position: 2, name: "U2"),
+      ],
+    )
+
+  let assert Ok(#(_, conflicts, entries)) =
+    scheduler.rebuild([urgent], settings, today)
+
+  assert conflicts == []
+  // The slack window is a single day, so both modules stack on it rather
+  // than spilling onto the true deadline day.
+  let assert [first, second] = entries
+  assert first.scheduled_date == today
+  assert first.slot_index == 0
+  assert second.scheduled_date == today
+  assert second.slot_index == 1
+}
+
+pub fn scheduler_prerequisite_chain_respects_slack_deadlines_test() {
+  let today = calendar.Date(2026, calendar.March, 19)
+  let settings = model.Settings(include_weekends: True, deadline_slack_days: 2)
+
+  let base =
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Base",
+      deadline: calendar.Date(2026, calendar.March, 24),
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "B1"),
+        module(id: 12, course_id: 1, position: 2, name: "B2"),
+      ],
+    )
+
+  let follow =
+    course(
+      id: 2,
+      vendor_name: "Vendor",
+      name: "Follow",
+      deadline: calendar.Date(2026, calendar.March, 28),
+      prerequisite_ids: [1],
+      prerequisites: ["Base"],
+      modules: [
+        module(id: 21, course_id: 2, position: 1, name: "F1"),
+        module(id: 22, course_id: 2, position: 2, name: "F2"),
+      ],
+    )
+
+  let assert Ok(#(_, conflicts, entries)) =
+    scheduler.rebuild([base, follow], settings, today)
+
+  assert conflicts == []
+  let base_dates =
+    entries
+    |> list.filter(fn(entry) { entry.course_name == "Base" })
+    |> list.map(fn(entry) { entry.scheduled_date })
+  let follow_dates =
+    entries
+    |> list.filter(fn(entry) { entry.course_name == "Follow" })
+    |> list.map(fn(entry) { entry.scheduled_date })
+  // Base finishes by its slack deadline (3/24 - 2 = 3/22), which lets Follow
+  // start the very next day and finish by its own slack deadline (3/26).
+  assert base_dates
+    == [
+      calendar.Date(2026, calendar.March, 19),
+      calendar.Date(2026, calendar.March, 22),
+    ]
+  assert follow_dates
+    == [
+      calendar.Date(2026, calendar.March, 23),
+      calendar.Date(2026, calendar.March, 26),
+    ]
+}
+
+pub fn scheduler_slack_larger_than_window_falls_back_to_true_deadline_test() {
+  let today = calendar.Date(2026, calendar.March, 19)
+  let deadline = calendar.Date(2026, calendar.March, 23)
+
+  let make_course = fn() {
+    course(
+      id: 1,
+      vendor_name: "Vendor",
+      name: "Course",
+      deadline: deadline,
+      prerequisite_ids: [],
+      prerequisites: [],
+      modules: [
+        module(id: 11, course_id: 1, position: 1, name: "One"),
+        module(id: 12, course_id: 1, position: 2, name: "Two"),
+        module(id: 13, course_id: 1, position: 3, name: "Three"),
+      ],
+    )
+  }
+
+  let assert Ok(#(_, slack_conflicts, slack_entries)) =
+    scheduler.rebuild(
+      [make_course()],
+      model.Settings(include_weekends: True, deadline_slack_days: 10),
+      today,
+    )
+  let assert Ok(#(_, zero_conflicts, zero_entries)) =
+    scheduler.rebuild(
+      [make_course()],
+      model.Settings(include_weekends: True, deadline_slack_days: 0),
+      today,
+    )
+
+  // A slack window that ends before today is empty, so scheduling falls back
+  // to the true deadline with no conflict, exactly as slack 0 behaves.
+  assert slack_conflicts == []
+  assert zero_conflicts == []
+  assert slack_entries == zero_entries
 }
 
 pub fn scheduler_compacts_large_internal_gaps_test() {

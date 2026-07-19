@@ -471,11 +471,18 @@ fn legal_move(
     Ok(module_context), True -> {
       let assert Ok(course_context) =
         dict.get(context.courses_by_id, module_context.course_id)
+      let earliest_start =
+        earliest_start_from_placements(
+          course_context.course.prerequisite_ids,
+          context,
+          placements,
+        )
+      let deadline_bound =
+        latest_allowed_finish(course_context, earliest_start, context.settings)
       case
         should_skip_day(context.settings, move.target_date)
         || date.compare(move.target_date, context.today) == Lt
-        || date.compare(move.target_date, course_context.effective_deadline)
-        == Gt
+        || date.compare(move.target_date, deadline_bound) == Gt
       {
         True -> False
 
@@ -490,12 +497,6 @@ fn legal_move(
             next_module_date(
               course_context.module_ids,
               move.module_id,
-              placements,
-            )
-          let earliest_start =
-            earliest_start_from_placements(
-              course_context.course.prerequisite_ids,
-              context,
               placements,
             )
           case
@@ -1079,12 +1080,17 @@ fn build_candidate(
       settings,
       today,
     )
-  let allowed_days =
-    days_in_window(earliest_start, plan.effective_deadline, settings)
   let preferred_deadline =
     preferred_deadline(plan.effective_deadline, settings.deadline_slack_days)
-  let preferred_day_count =
-    days_in_window(earliest_start, preferred_deadline, settings) |> list.length
+  let preferred_days =
+    days_in_window(earliest_start, preferred_deadline, settings)
+  // Finishing by the preferred deadline is a hard bound whenever at least one
+  // allowed day exists before it; otherwise fall back to the true deadline.
+  let allowed_days = case preferred_days {
+    [] -> days_in_window(earliest_start, plan.effective_deadline, settings)
+    _ -> preferred_days
+  }
+  let preferred_day_count = list.length(preferred_days)
   let slack = preferred_day_count - list.length(plan.remaining)
   CandidateCourse(
     plan:,
@@ -1567,6 +1573,22 @@ fn preferred_deadline(
   case deadline_slack_days <= 0 {
     True -> effective_deadline
     False -> date.add_days(effective_deadline, 0 - deadline_slack_days)
+  }
+}
+
+/// The hard latest finish for a course: its preferred deadline when at least
+/// one allowed day exists in [earliest_start, preferred_deadline], otherwise
+/// its true (effective) deadline.
+fn latest_allowed_finish(
+  course_context: CourseContext,
+  earliest_start: calendar.Date,
+  settings: model.Settings,
+) -> calendar.Date {
+  case
+    days_in_window(earliest_start, course_context.preferred_deadline, settings)
+  {
+    [] -> course_context.effective_deadline
+    _ -> course_context.preferred_deadline
   }
 }
 

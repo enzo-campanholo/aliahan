@@ -87,15 +87,30 @@ schedule_model_([Course|Courses], AllCourses, Today, Settings,
         maplist(course_deadline_ordinal, Active, DeadlineOrdinals),
         max_list(DeadlineOrdinals, LastOrdinal),
         calendar_days(Today, LastOrdinal, Settings, Days),
-        maplist(course_plan(Days, Settings), Active, Plans),
+        maplist(optimistic_start(AllCourses), Active, Starts),
+        maplist(course_plan(Days, Settings), Starts, Active, Plans),
         course_states(AllCourses, Plans, States),
         maplist(plan_constraints(States), Plans),
         plans_penalties(Plans, SpacingPenalties),
         maximum_fd(SpacingPenalties, Spacing),
         plans_variables(Plans, Vars),
         plans_overlap_lower_bound(Plans, ForcedOverlaps),
-        occupancy(Days, Vars, ForcedOverlaps, Overlaps, Peak),
+        plans_usable_day_count(Plans, UsableDays),
+        occupancy(Days, UsableDays, Vars, ForcedOverlaps, Overlaps, Peak),
         Score = score(Overlaps, Peak, Spacing).
+
+/*  Days past every course's latest allowed finish can host nothing, so
+    only days up to the highest reachable index count towards the
+    overlap and peak lower bounds. Without this the search bounds are
+    too optimistic whenever slack caps shrink the usable calendar.
+*/
+plans_usable_day_count(Plans, UsableDays) :-
+        maplist(plan_last_supremum, Plans, Suprema),
+        max_list(Suprema, MaxIndex),
+        UsableDays is MaxIndex + 1.
+
+plan_last_supremum(plan(_, _, _, _, _, Last, _, _), Supremum) :-
+        fd_sup(Last, Supremum).
 
 
 valid_problem(Courses, Today, settings(Days, Slack)) :-
@@ -267,7 +282,7 @@ eligible_course(Course, Schedulable) -->
 course_deadline_ordinal(course(_, Deadline, _, _), Ordinal) :-
         date_ordinal(Deadline, Ordinal).
 
-course_plan(Days, settings(_, Slack),
+course_plan(Days, settings(_, Slack), OptimisticStart,
             course(Id, Deadline, Prerequisites, Modules),
             plan(Id, Prerequisites, Modules, Dates,
                  First, Last, Preferred, _)) :-
@@ -280,7 +295,37 @@ course_plan(Days, settings(_, Slack),
         Dates ins 0..DeadlineIndex,
         chain(Dates, #=<),
         Dates = [First|_],
-        last(Dates, Last).
+        last(Dates, Last),
+        slack_cap(OptimisticStart, Preferred, Last).
+
+/*  Finishing by the slack-adjusted deadline is a hard bound whenever the
+    course could start by then: same-course modules may share a day, so a
+    course that can start in time can always finish in time. The earliest
+    possible start is derived from prerequisites alone (ground), not from
+    the search, so the optimizer cannot dodge the bound by starting late.
+    An unreachable slack target (Preferred < OptimisticStart, including
+    the empty-window Preferred = -1) falls back to the true deadline.
+*/
+slack_cap(OptimisticStart, Preferred, Last) :-
+        (   OptimisticStart =< Preferred
+        ->  Last #=< Preferred
+        ;   true
+        ).
+
+optimistic_start(Courses, course(_, _, Prerequisites, _), Start) :-
+        maplist(prerequisite_optimistic_start(Courses), Prerequisites,
+                Starts),
+        max_list([0|Starts], Start).
+
+prerequisite_optimistic_start(Courses, Id, Start) :-
+        course_with_id(Courses, Id, Course),
+        Course = course(_, _, _, Modules),
+        prerequisite_finish_start(Modules, Courses, Course, Start).
+
+prerequisite_finish_start([], _, _, 0).
+prerequisite_finish_start([_|_], Courses, Course, Start) :-
+        optimistic_start(Courses, Course, Start0),
+        Start is Start0 + 1.
 
 index_at_most([], _, Index, Index).
 index_at_most([day(Index0, _, Ordinal)|Days], Limit, _, Index) :-
@@ -387,9 +432,8 @@ plan_overlap_lower_bound(
         Window is LastSupremum - FirstInfimum + 1,
         LowerBound is max(0, ModuleCount - Window).
 
-occupancy(Days, Vars, ForcedOverlaps, Overlaps, Peak) :-
+occupancy(Days, UsableDays, Vars, ForcedOverlaps, Overlaps, Peak) :-
         length(Vars, ModuleCount),
-        length(Days, DayCount),
         same_length(Days, Counts),
         Counts ins 0..ModuleCount,
         days_indices(Days, Indices),
@@ -398,9 +442,9 @@ occupancy(Days, Vars, ForcedOverlaps, Overlaps, Peak) :-
         maplist(overlap_count, Counts, Extra),
         sum(Extra, #=, Overlaps),
         maximum_fd(Counts, Peak),
-        Overlaps #>= max(0, ModuleCount - DayCount),
+        Overlaps #>= max(0, ModuleCount - UsableDays),
         Overlaps #>= ForcedOverlaps,
-        Peak #>= (ModuleCount + DayCount - 1) div DayCount.
+        Peak #>= (ModuleCount + UsableDays - 1) div UsableDays.
 
 days_indices(Days, Indices) :-
         maplist(day_index, Days, Indices).

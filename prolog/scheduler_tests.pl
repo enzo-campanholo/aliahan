@@ -69,16 +69,15 @@ test(minimizes_peak_load_before_spacing_error) :-
         Dates = [date(2026,3,19),date(2026,3,19),date(2026,3,19),
                  date(2026,3,20),date(2026,3,20),date(2026,3,20)].
 
-test(spreads_required_overlap_across_the_window) :-
+test(spreads_required_overlap_across_the_slack_window) :-
         Courses = [course(a, date(2026,3,23), [],
                           [a1,a2,a3,a4,a5,a6,a7,a8])],
         once(schedule(Courses, date(2026,3,19), settings(weekends, 2),
-                      Entries, score(3, 2, _))),
+                      Entries, score(5, 3, _))),
         maplist(entry_date, Entries, Dates),
-        Dates = [date(2026,3,19),date(2026,3,19),
-                 date(2026,3,20),date(2026,3,20),
-                 date(2026,3,21),date(2026,3,21),
-                 date(2026,3,22),date(2026,3,23)].
+        Dates = [date(2026,3,19),date(2026,3,19),date(2026,3,19),
+                 date(2026,3,20),date(2026,3,20),date(2026,3,20),
+                 date(2026,3,21),date(2026,3,21)].
 
 test(spaces_modules_evenly) :-
         Courses = [course(a, date(2026,4,15), [], [a1,a2,a3,a4])],
@@ -96,6 +95,44 @@ test(avoids_overlap_between_courses) :-
         maplist(entry_date, Entries, Dates),
         sort(Dates, UniqueDates),
         same_length(Dates, UniqueDates).
+
+test(stacks_modules_to_finish_by_the_slack_deadline) :-
+        Courses = [course(a, date(2026,7,29), [],
+                          [a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12])],
+        once(schedule(Courses, date(2026,7,19), settings(weekends, 3),
+                      Entries)),
+        maplist(entry_date, Entries, Dates),
+        maplist(date_ordinal_leq(date(2026,7,26)), Dates),
+        length(Entries, 12).
+
+test(stacks_inside_a_single_day_slack_window) :-
+        Courses = [course(a, date(2026,3,20), [], [a1,a2])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 1),
+                      Entries, score(1, 2, 0))),
+        Entries = [entry(a, a1, date(2026,3,19), 0),
+                   entry(a, a2, date(2026,3,19), 1)].
+
+test(empty_slack_window_falls_back_to_the_true_deadline) :-
+        Courses = [course(a, date(2026,3,20), [], [a1,a2])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 5),
+                      Entries, [], _)),
+        Entries = [entry(a, a1, date(2026,3,19), 0),
+                   entry(a, a2, date(2026,3,20), 0)].
+
+test(prerequisite_chain_respects_slack_deadlines) :-
+        Courses = [course(base, date(2026,3,24), [], [base_1,base_2]),
+                   course(follow, date(2026,3,28), [base],
+                          [follow_1,follow_2])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 2),
+                      Entries)),
+        course_dates(Entries, base, BaseDates),
+        course_dates(Entries, follow, FollowDates),
+        last(BaseDates, BaseLast),
+        FollowDates = [FollowFirst|_],
+        last(FollowDates, FollowLast),
+        date_ordinal_leq(date(2026,3,22), BaseLast),
+        date_ordinal_leq(date(2026,3,26), FollowLast),
+        \+ date_ordinal_leq(BaseLast, FollowFirst).
 
 test(honours_deadline_slack_when_possible) :-
         Courses = [course(a, date(2026,3,22), [], [a1,a2])],
@@ -174,6 +211,15 @@ test(rejects_a_prerequisite_chain_without_enough_days, [fail]) :-
 
 
 entry_date(entry(_, _, Date, _), Date).
+
+date_ordinal_leq(Limit, Date) :-
+        scheduler:date_ordinal(Date, Ordinal),
+        scheduler:date_ordinal(Limit, LimitOrdinal),
+        Ordinal =< LimitOrdinal.
+
+course_dates(Entries, CourseId, Dates) :-
+        findall(Date, member(entry(CourseId, _, Date, _), Entries), Dates),
+        Dates = [_|_].
 
 
 :- end_tests(scheduler).
