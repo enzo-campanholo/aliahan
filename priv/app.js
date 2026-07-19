@@ -301,13 +301,15 @@ document.addEventListener("alpine:init", () => {
       return start.toLocaleDateString("en-US", opts) + " — " + end.toLocaleDateString("en-US", yearOpts);
     },
 
-    // Fade out, run action while invisible, fade back in
+    // Fade out while the action runs. Fast responses un-fade immediately
+    // (no fixed delay); slow ones swap content while fully faded out.
     async _withFade(fn) {
       const fadeRequestId = ++this._fadeRequestId;
       this._fading = true;
-      await new Promise((r) => setTimeout(r, 140));
+      const work = Promise.resolve().then(fn);
       try {
-        await fn();
+        await Promise.race([work, new Promise((r) => setTimeout(r, 140))]);
+        await work;
       } finally {
         if (fadeRequestId === this._fadeRequestId) this._fading = false;
       }
@@ -477,14 +479,17 @@ document.addEventListener("alpine:init", () => {
   // Vendor form
   Alpine.data("vendorForm", () => ({
     vendorName: "",
+    creating: false,
 
     async create() {
       const name = this.vendorName.trim();
-      if (!name) return;
+      if (!name || this.creating) return;
+      this.creating = true;
       const ok = await Alpine.store("app").mutate("/api/vendors", {
         method: "POST",
         body: JSON.stringify({ name }),
       });
+      this.creating = false;
       if (ok) {
         this.vendorName = "";
         showToast("Vendor created", "success");
@@ -660,6 +665,7 @@ document.addEventListener("alpine:init", () => {
     editingModuleId: null,
     moduleNameDraft: "",
     newModuleName: "",
+    addingModule: false,
     _dragIndex: null,
     _dragSnapshot: null,
     _dropHandled: false,
@@ -889,7 +895,12 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       const checked = !!event.target.checked;
+      const previousCompletedAt = mod.completed_at;
       this._moduleCompletionPending[mod.id] = checked;
+      // Optimistic: reflect the new state immediately so the row and progress
+      // bar respond instantly; refresh() confirms it, and a failed request
+      // (which skips refresh) reverts to the previous server state.
+      mod.completed_at = checked ? new Date().toISOString() : null;
       event.target.disabled = true;
       try {
         const ok = await Alpine.store("app").mutate(`/api/modules/${mod.id}`, {
@@ -897,7 +908,8 @@ document.addEventListener("alpine:init", () => {
           body: JSON.stringify({ completed: checked }),
         });
         if (!ok) {
-          event.target.checked = !!mod.completed_at;
+          mod.completed_at = previousCompletedAt;
+          event.target.checked = !!previousCompletedAt;
         }
       } finally {
         delete this._moduleCompletionPending[mod.id];
@@ -937,13 +949,15 @@ document.addEventListener("alpine:init", () => {
 
     async addModule() {
       const name = this.newModuleName.trim();
-      if (!name) return;
+      if (!name || this.addingModule) return;
       const course = this.course;
       if (!course) return;
+      this.addingModule = true;
       const ok = await Alpine.store("app").mutate(`/api/courses/${course.id}/modules`, {
         method: "POST",
         body: JSON.stringify({ name }),
       });
+      this.addingModule = false;
       if (ok) {
         this.newModuleName = "";
         showToast("Module added", "success");

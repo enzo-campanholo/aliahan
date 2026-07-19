@@ -568,7 +568,7 @@ fn index_html() -> String {
 
     <!-- Confirm dialog overlay -->
     <template x-if=\"$store.ui.confirmDialog\">
-      <div class=\"fixed inset-0 z-40 flex items-center justify-center\" x-data=\"confirmDialog\">
+      <div class=\"fixed inset-0 z-40 flex items-center justify-center\" x-data=\"confirmDialog\" @keydown.escape.window=\"cancel()\">
         <div class=\"absolute inset-0 bg-ink/30\" @click=\"cancel()\"></div>
         <div
           class=\"card relative z-10 bg-surface p-6 max-w-sm w-full mx-4\"
@@ -587,7 +587,7 @@ fn index_html() -> String {
 
     <!-- Course creation modal -->
     <template x-if=\"$store.ui.modalOpen\">
-      <div class=\"fixed inset-0 z-40 flex items-center justify-center\" x-data=\"courseModal\">
+      <div class=\"fixed inset-0 z-40 flex items-center justify-center\" x-data=\"courseModal\" @keydown.escape.window=\"close()\">
         <div class=\"absolute inset-0 bg-ink/30\" @click=\"close()\"></div>
         <div
           class=\"card relative z-10 bg-surface p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto\"
@@ -607,7 +607,7 @@ fn index_html() -> String {
             </div>
             <div>
               <label class=\"block text-sm font-bold font-heading mb-1\">Course name</label>
-              <input x-model=\"form.name\" class=\"input-brutal\" placeholder=\"e.g. Cloud Foundations\" required>
+              <input x-model=\"form.name\" class=\"input-brutal\" placeholder=\"e.g. Cloud Foundations\" required x-init=\"$nextTick(() => $el.focus())\">
             </div>
             <div>
               <label class=\"block text-sm font-bold font-heading mb-1\">Deadline</label>
@@ -670,12 +670,12 @@ fn index_html() -> String {
           <button
             class=\"px-5 py-2 font-heading font-bold text-base cursor-pointer transition-[background-color,color] duration-100\"
             :class=\"$store.ui.tab === 'schedule' ? 'bg-ink text-surface' : 'bg-surface text-ink'\"
-            @click=\"$store.ui.tab = 'schedule'\"
+            @click=\"if ($store.ui.tab !== 'schedule') { $store.ui.tab = 'schedule'; window.scrollTo(0, 0) }\"
           >Schedule</button>
           <button
             class=\"px-5 py-2 font-heading font-bold text-base border-l-3 border-ink cursor-pointer transition-[background-color,color] duration-100\"
             :class=\"$store.ui.tab === 'manage' ? 'bg-ink text-surface' : 'bg-surface text-ink'\"
-            @click=\"$store.ui.tab = 'manage'\"
+            @click=\"if ($store.ui.tab !== 'manage') { $store.ui.tab = 'manage'; window.scrollTo(0, 0) }\"
           >Manage</button>
         </div>
 
@@ -693,6 +693,7 @@ fn index_html() -> String {
           <div
             x-show=\"$store.ui.conflictsOpen\"
             @click.outside=\"$store.ui.conflictsOpen = false\"
+            @keydown.escape.window=\"$store.ui.conflictsOpen = false\"
             x-transition:enter=\"transition-[transform,opacity] duration-200 ease-out\"
             x-transition:enter-start=\"-translate-y-2 opacity-0\"
             x-transition:enter-end=\"translate-y-0 opacity-100\"
@@ -723,6 +724,7 @@ fn index_html() -> String {
           <div
             x-show=\"$store.ui.settingsOpen && $store.app.data?.settings\"
             @click.outside=\"$store.ui.settingsOpen = false\"
+            @keydown.escape.window=\"$store.ui.settingsOpen = false\"
             x-transition:enter=\"transition-[transform,opacity] duration-200 ease-out\"
             x-transition:enter-start=\"-translate-y-2 opacity-0\"
             x-transition:enter-end=\"translate-y-0 opacity-100\"
@@ -1056,7 +1058,7 @@ fn index_html() -> String {
               placeholder=\"Vendor name\"
               @keydown.enter=\"create()\"
             >
-            <button class=\"btn btn-yellow text-sm\" @click=\"create()\" :disabled=\"!vendorName.trim()\">+ Add Vendor</button>
+            <button class=\"btn btn-yellow text-sm\" @click=\"create()\" :disabled=\"!vendorName.trim() || creating\">+ Add Vendor</button>
           </div>
         </div>
 
@@ -1282,7 +1284,7 @@ fn index_html() -> String {
                           x-model=\"newModuleName\"
                           @keydown.enter=\"addModule()\"
                         >
-                        <button class=\"btn text-sm\" @click=\"addModule()\" :disabled=\"!newModuleName.trim()\">+ Add</button>
+                        <button class=\"btn text-sm\" @click=\"addModule()\" :disabled=\"!newModuleName.trim() || addingModule\">+ Add</button>
                       </div>
                     </div>
                   </template>
