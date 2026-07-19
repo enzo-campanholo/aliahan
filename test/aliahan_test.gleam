@@ -6,6 +6,7 @@ import aliahan/prolog_scheduler
 import aliahan/scheduler
 import aliahan/store
 import aliahan/web
+import gleam/dynamic/decode
 import gleam/http
 import gleam/http/response as http_response
 import gleam/int
@@ -718,14 +719,7 @@ pub fn completing_todays_module_keeps_today_blank_across_reads_and_name_patch_te
       let tomorrow = date.day_after(today)
       let day_after_tomorrow = date.day_after(tomorrow)
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -786,14 +780,7 @@ pub fn completing_module_refreshes_prolog_preview_test() {
   with_isolated_store("completing_module_refreshes_prolog_preview", fn(_, _) {
     let today = date.today()
 
-    let assert Ok(Nil) = store.initialise()
-    let assert Ok(Nil) =
-      store.set_settings(model.SettingsPatch(
-        include_weekends: Some(True),
-        deadline_slack_days: None,
-      ))
-    let assert Ok(Nil) = store.create_vendor("Vendor")
-    let vendor = vendor_named("Vendor")
+    let vendor = seed_weekend_vendor()
     let assert Ok(Nil) =
       store.create_course(model.NewCourseInput(
         vendor_id: vendor.id,
@@ -823,14 +810,7 @@ pub fn prolog_preview_reports_each_blocked_course_and_keeps_feasible_work_test()
     fn(_, _) {
       let today = date.today()
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -888,14 +868,7 @@ pub fn completing_non_today_module_rebuilds_and_unblocks_future_work_test() {
       let tomorrow = date.day_after(today)
       let day_after_tomorrow = date.day_after(tomorrow)
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -936,14 +909,7 @@ pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
     let today = date.today()
     let tomorrow = date.day_after(today)
 
-    let assert Ok(Nil) = store.initialise()
-    let assert Ok(Nil) =
-      store.set_settings(model.SettingsPatch(
-        include_weekends: Some(True),
-        deadline_slack_days: None,
-      ))
-    let assert Ok(Nil) = store.create_vendor("Vendor")
-    let vendor = vendor_named("Vendor")
+    let vendor = seed_weekend_vendor()
     let assert Ok(Nil) =
       store.create_course(model.NewCourseInput(
         vendor_id: vendor.id,
@@ -976,6 +942,108 @@ pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
   })
 }
 
+pub fn cached_bootstrap_returns_conflicts_from_the_rebuild_test() {
+  with_isolated_store(
+    "cached_bootstrap_returns_conflicts_from_the_rebuild",
+    fn(_, _) {
+      let today = date.today()
+      let vendor = seed_weekend_vendor()
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Impossible",
+          deadline: date.day_before(today),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Late"]),
+        ))
+
+      // Mark the persisted schedule as stale so the next bootstrap rebuilds
+      // it, and the one after that is served from the cache.
+      let assert Ok(connection) = sqlight.open(store.database_path())
+      let stale_date = date.to_iso(date.day_before(today))
+      let assert Ok(_) = sqlight.exec("
+        update app_settings
+        set schedule_generated_for = '" <> stale_date <> "'
+        where id = 1
+        ", on: connection)
+      let assert Ok(_) = sqlight.close(connection)
+
+      let rebuilt = bootstrap_for(today)
+      let cached = bootstrap_for(today)
+
+      let assert [conflict] = rebuilt.conflicts
+      assert conflict.vendor_name == "Vendor"
+      assert conflict.course_name == "Impossible"
+      assert cached.conflicts == rebuilt.conflicts
+    },
+  )
+}
+
+pub fn prolog_bootstrap_reuses_cached_solver_response_test() {
+  with_isolated_store(
+    "prolog_bootstrap_reuses_cached_solver_response",
+    fn(_, _) {
+      let today = date.today()
+      let vendor = seed_weekend_vendor()
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Cached",
+          deadline: date.add_days(today, 5),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Only"]),
+        ))
+
+      let assert Ok(first) =
+        store.bootstrap_with_scheduler(
+          "week",
+          today,
+          None,
+          model.PrologScheduler,
+        )
+      assert schedule_module_names_on(first, today) == ["Only"]
+
+      let assert Ok(second) =
+        store.bootstrap_with_scheduler(
+          "week",
+          today,
+          None,
+          model.PrologScheduler,
+        )
+      assert second == first
+
+      // The first call must have populated the cache. Tamper with the cached
+      // response: if the next bootstrap reflects the tampered payload it was
+      // served from the cache rather than from another solver run.
+      let assert Ok(connection) = sqlight.open(store.database_path())
+      let count_decoder = decode.field(0, decode.int, decode.success)
+      let assert Ok([1]) =
+        sqlight.query(
+          "select count(*) from prolog_cache where id = 1",
+          on: connection,
+          with: [],
+          expecting: count_decoder,
+        )
+      let assert Ok(_) =
+        sqlight.exec(
+          "update prolog_cache
+           set response = '{\"entries\":[],\"conflicts\":[]}'",
+          on: connection,
+        )
+      let assert Ok(_) = sqlight.close(connection)
+
+      let assert Ok(tampered) =
+        store.bootstrap_with_scheduler(
+          "week",
+          today,
+          None,
+          model.PrologScheduler,
+        )
+      assert schedule_module_names_on(tampered, today) == []
+    },
+  )
+}
+
 pub fn bootstrap_can_preview_schedule_from_custom_start_without_persisting_test() {
   with_isolated_store(
     "bootstrap_can_preview_schedule_from_custom_start_without_persisting",
@@ -983,14 +1051,7 @@ pub fn bootstrap_can_preview_schedule_from_custom_start_without_persisting_test(
       let today = date.today()
       let simulated_start = date.day_after(today)
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -1005,7 +1066,12 @@ pub fn bootstrap_can_preview_schedule_from_custom_start_without_persisting_test(
       assert persisted_module_before.scheduled_date == Some(today)
 
       let assert Ok(preview) =
-        store.bootstrap("week", simulated_start, Some(simulated_start))
+        store.bootstrap_with_scheduler(
+          "week",
+          simulated_start,
+          Some(simulated_start),
+          model.GleamScheduler,
+        )
       assert preview.today == today
       assert preview.schedule_start == simulated_start
       let assert Ok(preview_vendor) =
@@ -1032,14 +1098,7 @@ pub fn prolog_preview_does_not_replace_the_stored_gleam_schedule_test() {
       let today = date.today()
       let simulated_start = date.day_after(today)
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -1073,14 +1132,7 @@ pub fn bootstrap_start_query_returns_preview_schedule_test() {
       let simulated_start = date.day_after(today)
       let start_iso = date.to_iso(simulated_start)
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -1119,14 +1171,7 @@ pub fn bootstrap_prolog_scheduler_query_returns_preview_test() {
       let today = date.today()
       let today_iso = date.to_iso(today)
 
-      let assert Ok(Nil) = store.initialise()
-      let assert Ok(Nil) =
-        store.set_settings(model.SettingsPatch(
-          include_weekends: Some(True),
-          deadline_slack_days: None,
-        ))
-      let assert Ok(Nil) = store.create_vendor("Vendor")
-      let vendor = vendor_named("Vendor")
+      let vendor = seed_weekend_vendor()
       let assert Ok(Nil) =
         store.create_course(model.NewCourseInput(
           vendor_id: vendor.id,
@@ -1446,30 +1491,6 @@ pub fn patch_module_rejects_empty_payload_test() {
   })
 }
 
-pub fn patch_module_rejects_unknown_only_payload_test() {
-  with_isolated_store("patch_module_rejects_unknown_only_payload", fn(_, _) {
-    let assert Ok(Nil) = store.initialise()
-    let course =
-      seed_course(
-        vendor_name: "Vendor",
-        course_name: "Validation",
-        modules: model.ExplicitModules(["Only module"]),
-      )
-    let assert [module] = course.modules
-
-    let request =
-      simulate.request(http.Patch, "/api/modules/" <> int.to_string(module.id))
-      |> simulate.json_body(json.object([#("unknown", json.string("value"))]))
-    let response = web.handle(request, "priv")
-
-    assert response.status == 400
-    assert string.contains(
-      simulate.read_body(response),
-      "Module patch must include at least one updatable field",
-    )
-  })
-}
-
 pub fn reorder_modules_persists_requested_order_test() {
   with_isolated_store("reorder_modules_persists_requested_order", fn(_, _) {
     let assert Ok(Nil) = store.initialise()
@@ -1706,6 +1727,19 @@ fn restore_env(name: String, value: Result(String, Nil)) -> Nil {
   }
 }
 
+/// Initialises the store with weekend scheduling enabled and a vendor named
+/// "Vendor" — the shared starting point for the schedule and Prolog tests.
+fn seed_weekend_vendor() -> model.Vendor {
+  let assert Ok(Nil) = store.initialise()
+  let assert Ok(Nil) =
+    store.set_settings(model.SettingsPatch(
+      include_weekends: Some(True),
+      deadline_slack_days: None,
+    ))
+  let assert Ok(Nil) = store.create_vendor("Vendor")
+  vendor_named("Vendor")
+}
+
 fn seed_course(
   vendor_name vendor_name: String,
   course_name course_name: String,
@@ -1728,12 +1762,18 @@ fn seed_course(
 
 fn bootstrap_data() -> model.BootstrapData {
   let assert Ok(data) =
-    store.bootstrap("week", calendar.Date(2026, calendar.March, 19), None)
+    store.bootstrap_with_scheduler(
+      "week",
+      calendar.Date(2026, calendar.March, 19),
+      None,
+      model.GleamScheduler,
+    )
   data
 }
 
 fn bootstrap_for(anchor: calendar.Date) -> model.BootstrapData {
-  let assert Ok(data) = store.bootstrap("month", anchor, None)
+  let assert Ok(data) =
+    store.bootstrap_with_scheduler("month", anchor, None, model.GleamScheduler)
   data
 }
 

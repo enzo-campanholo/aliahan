@@ -61,35 +61,79 @@ pub fn courses_toml_path() -> String {
 }
 
 pub fn initialise() -> Result(Nil, AppError) {
-  use _ <- result.try(
-    with_db(fn(connection) {
-      use _ <- result.try(prepare_schema(connection))
+  with_db(fn(connection) {
+    use _ <- result.try(prepare_schema(connection))
 
-      use contains_courses <- result.try(has_courses(connection))
+    use contains_courses <- result.try(has_courses(connection))
 
-      use _ <- result.try(case contains_courses {
-        False ->
-          case simplifile.is_file(courses_toml_path()) {
-            Ok(True) -> transactional(connection, import_from_toml)
-            _ -> transactional(connection, refresh_schedule_in_transaction)
-          }
-        True -> transactional(connection, refresh_schedule_in_transaction)
-      })
+    use _ <- result.try(case contains_courses {
+      False ->
+        case simplifile.is_file(courses_toml_path()) {
+          Ok(True) -> transactional(connection, import_from_toml)
+          _ -> transactional(connection, refresh_schedule_in_transaction)
+        }
+      True -> transactional(connection, refresh_schedule_in_transaction)
+    })
 
-      Ok(Nil)
-    }),
-  )
-
-  let _ = export_snapshot()
-  Ok(Nil)
+    let _ = export_snapshot(connection)
+    Ok(Nil)
+  })
 }
 
-pub fn bootstrap(
-  view: String,
-  anchor: calendar.Date,
+/// The data shared by `bootstrap_with_scheduler` and
+/// `schedule_view_with_scheduler`. `rebuilt` carries the vendors and stored
+/// entries produced by an in-memory rebuild; it is `None` when the persisted
+/// schedule was served from the cache.
+type ScheduleData {
+  ScheduleData(
+    schedule_start: calendar.Date,
+    conflicts: List(Conflict),
+    schedule_entries: List(ScheduleEntry),
+    rebuilt: Option(#(List(Vendor), List(scheduler.StoredEntry))),
+  )
+}
+
+fn load_schedule_data(
+  connection: sqlight.Connection,
   schedule_start: Option(calendar.Date),
-) -> Result(BootstrapData, AppError) {
-  bootstrap_with_scheduler(view, anchor, schedule_start, GleamScheduler)
+  engine: SchedulerEngine,
+  today: calendar.Date,
+) -> Result(ScheduleData, AppError) {
+  case engine, schedule_start {
+    GleamScheduler, None -> {
+      use #(conflicts, schedule_entries) <- result.try(transactional(
+        connection,
+        ensure_schedule_in_transaction,
+      ))
+      Ok(ScheduleData(
+        schedule_start: today,
+        conflicts: conflicts,
+        schedule_entries: schedule_entries,
+        rebuilt: None,
+      ))
+    }
+    engine, start -> {
+      let schedule_start = option.unwrap(start, today)
+      use settings <- result.try(load_settings(connection))
+      use vendors <- result.try(load_vendors(connection))
+      let courses = list.flat_map(vendors, fn(vendor) { vendor.courses })
+      use #(stored_entries, conflicts, schedule_entries) <- result.try(
+        rebuild_with_scheduler(
+          connection,
+          courses,
+          settings,
+          schedule_start,
+          engine,
+        ),
+      )
+      Ok(ScheduleData(
+        schedule_start: schedule_start,
+        conflicts: conflicts,
+        schedule_entries: schedule_entries,
+        rebuilt: Some(#(vendors, stored_entries)),
+      ))
+    }
+  }
 }
 
 pub fn bootstrap_with_scheduler(
@@ -101,52 +145,28 @@ pub fn bootstrap_with_scheduler(
   with_db(fn(connection) {
     use _ <- result.try(enable_foreign_keys(connection))
     let today = date.today()
-    case engine, schedule_start {
-      GleamScheduler, None -> {
-        use #(conflicts, schedule_entries) <- result.try(transactional(
-          connection,
-          ensure_schedule_in_transaction,
-        ))
-        use settings <- result.try(load_settings(connection))
-        use vendors <- result.try(load_vendors(connection))
-        let schedule = build_schedule_view(schedule_entries, view, anchor)
-        Ok(BootstrapData(
-          today: today,
-          schedule_start: today,
-          settings: settings,
-          vendors: vendors,
-          conflicts: conflicts,
-          schedule: schedule,
-        ))
-      }
-      engine, start -> {
-        let schedule_start = option.unwrap(start, today)
-        use settings <- result.try(load_settings(connection))
-        use courses <- result.try(load_courses(connection))
-        use #(stored_entries, conflicts, schedule_entries) <- result.try(
-          rebuild_with_scheduler(courses, settings, schedule_start, engine),
-        )
-        use vendors <- result.try(load_vendors(connection))
-        let schedule = build_schedule_view(schedule_entries, view, anchor)
-        Ok(BootstrapData(
-          today: today,
-          schedule_start: schedule_start,
-          settings: settings,
-          vendors: decorate_vendors_with_schedule(vendors, stored_entries),
-          conflicts: conflicts,
-          schedule: schedule,
-        ))
-      }
-    }
+    use data <- result.try(load_schedule_data(
+      connection,
+      schedule_start,
+      engine,
+      today,
+    ))
+    use settings <- result.try(load_settings(connection))
+    use vendors <- result.try(case data.rebuilt {
+      None -> load_vendors(connection)
+      Some(#(vendors, stored_entries)) ->
+        Ok(decorate_vendors_with_schedule(vendors, stored_entries))
+    })
+    let schedule = build_schedule_view(data.schedule_entries, view, anchor)
+    Ok(BootstrapData(
+      today: today,
+      schedule_start: data.schedule_start,
+      settings: settings,
+      vendors: vendors,
+      conflicts: data.conflicts,
+      schedule: schedule,
+    ))
   })
-}
-
-pub fn schedule_view(
-  view: String,
-  anchor: calendar.Date,
-  schedule_start: Option(calendar.Date),
-) -> Result(ScheduleView, AppError) {
-  schedule_view_with_scheduler(view, anchor, schedule_start, GleamScheduler)
 }
 
 pub fn schedule_view_with_scheduler(
@@ -157,27 +177,13 @@ pub fn schedule_view_with_scheduler(
 ) -> Result(ScheduleView, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(enable_foreign_keys(connection))
-    case engine, schedule_start {
-      GleamScheduler, None -> {
-        use #(_, schedule_entries) <- result.try(transactional(
-          connection,
-          ensure_schedule_in_transaction,
-        ))
-        Ok(build_schedule_view(schedule_entries, view, anchor))
-      }
-      engine, start -> {
-        let schedule_start = option.unwrap(start, date.today())
-        use settings <- result.try(load_settings(connection))
-        use courses <- result.try(load_courses(connection))
-        use #(_, _, schedule_entries) <- result.try(rebuild_with_scheduler(
-          courses,
-          settings,
-          schedule_start,
-          engine,
-        ))
-        Ok(build_schedule_view(schedule_entries, view, anchor))
-      }
-    }
+    use data <- result.try(load_schedule_data(
+      connection,
+      schedule_start,
+      engine,
+      date.today(),
+    ))
+    Ok(build_schedule_view(data.schedule_entries, view, anchor))
   })
 }
 
@@ -469,21 +475,18 @@ pub fn delete_module(module_id: Int) -> Result(Nil, AppError) {
 fn apply_mutation(
   mutation: fn(sqlight.Connection) -> Result(ScheduleMutation, AppError),
 ) -> Result(Nil, AppError) {
-  use _ <- result.try(
-    with_db(fn(connection) {
-      use _ <- result.try(enable_foreign_keys(connection))
-      use _ <- result.try(
-        transactional(connection, fn(tx) {
-          use schedule_mutation <- result.try(mutation(tx))
-          use _ <- result.try(apply_schedule_mutation(tx, schedule_mutation))
-          Ok(Nil)
-        }),
-      )
-      Ok(Nil)
-    }),
-  )
-  let _ = export_snapshot()
-  Ok(Nil)
+  with_db(fn(connection) {
+    use _ <- result.try(enable_foreign_keys(connection))
+    use _ <- result.try(
+      transactional(connection, fn(tx) {
+        use schedule_mutation <- result.try(mutation(tx))
+        use _ <- result.try(apply_schedule_mutation(tx, schedule_mutation))
+        Ok(Nil)
+      }),
+    )
+    let _ = export_snapshot(connection)
+    Ok(Nil)
+  })
 }
 
 fn with_db(
@@ -625,6 +628,7 @@ fn refresh_schedule_in_transaction(
     stored_entries,
     Some(today_iso),
   ))
+  use _ <- result.try(persist_schedule_conflicts(connection, conflicts))
   Ok(#(conflicts, schedule_entries))
 }
 
@@ -639,7 +643,7 @@ fn ensure_schedule_in_transaction(
   ))
   case schedule_is_current {
     True -> {
-      use #(_, conflicts, _) <- result.try(compute_schedule(connection, today))
+      use conflicts <- result.try(load_schedule_conflicts(connection))
       use schedule_entries <- result.try(load_schedule_entries(connection))
       Ok(#(conflicts, schedule_entries))
     }
@@ -660,6 +664,7 @@ fn compute_schedule(
 }
 
 fn rebuild_with_scheduler(
+  connection: sqlight.Connection,
   courses: List(Course),
   settings: Settings,
   today: calendar.Date,
@@ -670,8 +675,68 @@ fn rebuild_with_scheduler(
 ) {
   case engine {
     GleamScheduler -> scheduler.rebuild(courses, settings, today)
-    PrologScheduler -> prolog_scheduler.rebuild(courses, settings, today)
+    PrologScheduler ->
+      prolog_rebuild_cached(connection, courses, settings, today)
   }
+}
+
+/// Runs the Prolog scheduler, caching its raw request/response pair in the
+/// database. When the freshly built request matches the cached one byte for
+/// byte the cached response is parsed instead of shelling out to swipl again.
+/// Any change to courses, settings, or the current date alters the request
+/// JSON, so no explicit invalidation is needed. Names are re-derived from the
+/// current courses when parsing, so renames stay fresh even on cache hits.
+fn prolog_rebuild_cached(
+  connection: sqlight.Connection,
+  courses: List(Course),
+  settings: Settings,
+  today: calendar.Date,
+) -> Result(
+  #(List(scheduler.StoredEntry), List(Conflict), List(ScheduleEntry)),
+  AppError,
+) {
+  let request = prolog_scheduler.build_request(courses, settings, today)
+  use cached <- result.try(load_prolog_cache(connection))
+  case cached {
+    Some(#(cached_request, cached_response)) if cached_request == request ->
+      prolog_scheduler.parse_output(cached_response, courses)
+    _ -> {
+      use response <- result.try(prolog_scheduler.run_solver(request))
+      use parsed <- result.try(prolog_scheduler.parse_output(response, courses))
+      use _ <- result.try(store_prolog_cache(connection, request, response))
+      Ok(parsed)
+    }
+  }
+}
+
+fn load_prolog_cache(
+  connection: sqlight.Connection,
+) -> Result(Option(#(String, String)), AppError) {
+  use rows <- result.try(query(
+    "select request, response from prolog_cache where id = 1",
+    [],
+    pair_string_string_decoder(),
+    connection,
+  ))
+  case rows {
+    [row, ..] -> Ok(Some(row))
+    [] -> Ok(None)
+  }
+}
+
+fn store_prolog_cache(
+  connection: sqlight.Connection,
+  request: String,
+  response: String,
+) -> Result(Nil, AppError) {
+  exec_with_args(
+    "
+    insert or replace into prolog_cache (id, request, response)
+    values (1, ?, ?)
+    ",
+    [sqlight.text(request), sqlight.text(response)],
+    connection,
+  )
 }
 
 fn persist_schedule_entries(
@@ -700,6 +765,49 @@ fn persist_schedule_entries(
   Ok(Nil)
 }
 
+fn persist_schedule_conflicts(
+  connection: sqlight.Connection,
+  conflicts: List(Conflict),
+) -> Result(Nil, AppError) {
+  use _ <- result.try(exec(connection, "delete from schedule_conflicts"))
+  list.try_fold(conflicts, Nil, fn(_, conflict) {
+    exec_with_args(
+      "insert into schedule_conflicts (course_id, message) values (?, ?)",
+      [sqlight.int(conflict.course_id), sqlight.text(conflict.message)],
+      connection,
+    )
+  })
+}
+
+/// Vendor and course names are joined at read time rather than stored, so a
+/// rename after the schedule was generated is still reflected in conflicts.
+fn load_schedule_conflicts(
+  connection: sqlight.Connection,
+) -> Result(List(Conflict), AppError) {
+  use rows <- result.try(query(
+    "
+    select sc.course_id, v.name, c.name, sc.message
+    from schedule_conflicts sc
+    join courses c on c.id = sc.course_id
+    join vendors v on v.id = c.vendor_id
+    order by sc.rowid
+    ",
+    [],
+    conflict_row_decoder(),
+    connection,
+  ))
+  rows
+  |> list.map(fn(row) {
+    model.Conflict(
+      course_id: row.0,
+      vendor_name: row.1,
+      course_name: row.2,
+      message: row.3,
+    )
+  })
+  |> Ok
+}
+
 fn apply_schedule_mutation(
   connection: sqlight.Connection,
   schedule_mutation: ScheduleMutation,
@@ -709,18 +817,19 @@ fn apply_schedule_mutation(
     RebuildStoredSchedule ->
       refresh_schedule_in_transaction(connection)
       |> result.map(fn(_) { Nil })
+    // Removing a single completed module from the stored schedule cannot
+    // change which courses are in conflict, so the persisted conflicts are
+    // deliberately left untouched here.
     RemoveStoredModuleFromSchedule(module_id) ->
       delete_schedule_entry(connection, module_id)
   }
 }
 
-fn export_snapshot() -> Result(Nil, AppError) {
-  with_db(fn(connection) {
-    use vendors <- result.try(load_vendors(connection))
-    let contents = config.export_courses_toml(vendors)
-    simplifile.write(to: courses_toml_path(), contents: contents)
-    |> result.map_error(file_error)
-  })
+fn export_snapshot(connection: sqlight.Connection) -> Result(Nil, AppError) {
+  use vendors <- result.try(load_vendors(connection))
+  let contents = config.export_courses_toml(vendors)
+  simplifile.write(to: courses_toml_path(), contents: contents)
+  |> result.map_error(file_error)
 }
 
 fn has_courses(connection: sqlight.Connection) -> Result(Bool, AppError) {
@@ -1698,6 +1807,24 @@ fn pair_int_string_decoder() -> decode.Decoder(#(Int, String)) {
   }
 }
 
+fn pair_string_string_decoder() -> decode.Decoder(#(String, String)) {
+  {
+    use first <- decode.field(0, decode.string)
+    use second <- decode.field(1, decode.string)
+    decode.success(#(first, second))
+  }
+}
+
+fn conflict_row_decoder() -> decode.Decoder(#(Int, String, String, String)) {
+  {
+    use course_id <- decode.field(0, decode.int)
+    use vendor_name <- decode.field(1, decode.string)
+    use course_name <- decode.field(2, decode.string)
+    use message <- decode.field(3, decode.string)
+    decode.success(#(course_id, vendor_name, course_name, message))
+  }
+}
+
 fn int_decoder() -> decode.Decoder(Int) {
   decode.field(0, decode.int, decode.success)
 }
@@ -1840,5 +1967,16 @@ create table if not exists app_settings (
   include_weekends integer not null,
   deadline_slack_days integer not null default 0,
   schedule_generated_for text
+);
+
+create table if not exists schedule_conflicts (
+  course_id integer not null references courses(id) on delete cascade,
+  message text not null
+);
+
+create table if not exists prolog_cache (
+  id integer primary key check (id = 1),
+  request text not null,
+  response text not null
 );
 "

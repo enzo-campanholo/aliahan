@@ -50,13 +50,45 @@ pub fn rebuild(
   ),
   model.AppError,
 ) {
-  let input = encode_request(courses, settings, today) |> json.to_string
-  use output <- result.try(
-    run(input)
-    |> result.map_error(fn(message) {
-      model.IOError("Prolog scheduler failed: " <> message)
-    }),
-  )
+  let input = build_request(courses, settings, today)
+  use output <- result.try(run_solver(input))
+  parse_output(output, courses)
+}
+
+/// Builds the JSON request sent to the Prolog solver. The string is stable
+/// for identical inputs, so it doubles as a cache key: any change to the
+/// courses, settings, or date produces a different request.
+pub fn build_request(
+  courses: List(model.Course),
+  settings: model.Settings,
+  today: calendar.Date,
+) -> String {
+  encode_request(courses, settings, today) |> json.to_string
+}
+
+/// Runs the Prolog solver with a request built by `build_request`, returning
+/// its raw JSON output.
+pub fn run_solver(input: String) -> Result(String, model.AppError) {
+  run(input)
+  |> result.map_error(fn(message) {
+    model.IOError("Prolog scheduler failed: " <> message)
+  })
+}
+
+/// Parses raw solver output into schedule entries and conflicts. Vendor,
+/// course, and module names are derived from the courses passed in, not from
+/// the output, so replaying a cached response reflects current names.
+pub fn parse_output(
+  output: String,
+  courses: List(model.Course),
+) -> Result(
+  #(
+    List(scheduler.StoredEntry),
+    List(model.Conflict),
+    List(model.ScheduleEntry),
+  ),
+  model.AppError,
+) {
   use response <- result.try(
     json.parse(output, response_decoder())
     |> result.map_error(fn(_) {
