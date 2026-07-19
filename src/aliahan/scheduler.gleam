@@ -88,7 +88,7 @@ type ScoredMove {
 
 const max_idle_gap = 2
 
-pub fn validate_no_cycles(
+fn validate_no_cycles(
   courses: List(model.Course),
 ) -> Result(Nil, model.AppError) {
   let active_ids = unfinished_course_ids(courses)
@@ -358,9 +358,10 @@ fn best_improving_move(
   placements: List(Placement),
   current_score: ScheduleScore,
 ) -> Option(ScoredMove) {
+  let active_dates = unique_active_dates(placements)
   oversized_gaps(context.settings, placements)
   |> list.fold(None, fn(best, gap) {
-    candidate_moves_for_gap(context, placements, gap)
+    candidate_moves_for_gap(context, placements, active_dates, gap)
     |> list.fold(best, fn(inner_best, move) {
       let next_placements = apply_move(placements, move)
       let score = schedule_score(context, next_placements)
@@ -411,9 +412,9 @@ fn compare_schedule_score(left: ScheduleScore, right: ScheduleScore) -> Order {
 fn candidate_moves_for_gap(
   context: ScheduleContext,
   placements: List(Placement),
+  active_dates: List(calendar.Date),
   gap: Gap,
 ) -> List(CandidateMove) {
-  let active_dates = unique_active_dates(placements)
   let left_target =
     next_allowed_day(date.day_after(gap.left_date), context.settings)
   let right_target =
@@ -1060,14 +1061,9 @@ fn split_ready(
   finished_dates: dict.Dict(Int, calendar.Date),
 ) -> #(List(PlannedCourse), List(PlannedCourse)) {
   planned
-  |> list.fold(#([], []), fn(acc, plan) {
-    let #(ready, blocked) = acc
-    case prerequisites_scheduled(plan.course.prerequisite_ids, finished_dates) {
-      True -> #([plan, ..ready], blocked)
-      False -> #(ready, [plan, ..blocked])
-    }
+  |> list.partition(fn(plan) {
+    prerequisites_scheduled(plan.course.prerequisite_ids, finished_dates)
   })
-  |> reverse_both
 }
 
 fn build_candidate(
@@ -1103,14 +1099,7 @@ fn split_impossible(
   candidates: List(CandidateCourse),
 ) -> #(List(CandidateCourse), List(CandidateCourse)) {
   candidates
-  |> list.fold(#([], []), fn(acc, candidate) {
-    let #(impossible, schedulable) = acc
-    case candidate.allowed_days {
-      [] -> #([candidate, ..impossible], schedulable)
-      _ -> #(impossible, [candidate, ..schedulable])
-    }
-  })
-  |> reverse_both
+  |> list.partition(fn(candidate) { candidate.allowed_days == [] })
 }
 
 fn place_course(
@@ -1840,7 +1829,7 @@ fn find_course(
 fn index_range(start: Int, finish: Int) -> List(Int) {
   case start > finish {
     True -> []
-    False -> [start, ..index_range(start + 1, finish)]
+    False -> int.range(from: finish, to: start - 1, with: [], run: list.prepend)
   }
 }
 
@@ -1850,9 +1839,4 @@ fn date_for_index(days: List(calendar.Date), index: Int) -> calendar.Date {
     [_, ..rest], _ -> date_for_index(rest, index - 1)
     [], _ -> panic as "Invalid schedule day index"
   }
-}
-
-fn reverse_both(input: #(List(a), List(b))) -> #(List(a), List(b)) {
-  let #(left, right) = input
-  #(list.reverse(left), list.reverse(right))
 }

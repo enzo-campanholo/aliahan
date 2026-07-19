@@ -105,7 +105,7 @@ pub fn day_before(date: calendar.Date) -> calendar.Date {
   add_days(date, -1)
 }
 
-pub fn days_in_month(year: Int, month: calendar.Month) -> Int {
+fn days_in_month(year: Int, month: calendar.Month) -> Int {
   case month {
     calendar.January
     | calendar.March
@@ -144,7 +144,7 @@ pub fn end_of_month(date: calendar.Date) -> calendar.Date {
   )
 }
 
-pub fn weekday_number(date: calendar.Date) -> Int {
+fn weekday_number(date: calendar.Date) -> Int {
   let month = calendar.month_to_int(date.month)
   let adjusted_year = case month < 3 {
     True -> date.year - 1
@@ -162,7 +162,7 @@ pub fn weekday_number(date: calendar.Date) -> Int {
     / 400
     + month_offset
     + date.day
-  let sunday_based = modulo(value, 7)
+  let assert Ok(sunday_based) = int.modulo(value, 7)
   case sunday_based {
     0 -> 7
     _ -> sunday_based
@@ -206,14 +206,6 @@ fn parse_part(input: String, message: String) -> Result(Int, AppError) {
 fn first(pair: #(a, b)) -> a {
   let #(value, _) = pair
   value
-}
-
-fn modulo(left: Int, right: Int) -> Int {
-  let result = left % right
-  case result < 0 {
-    True -> result + right
-    False -> result
-  }
 }
 
 fn is_leap_year(year: Int) -> Bool {
