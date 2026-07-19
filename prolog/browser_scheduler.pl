@@ -14,7 +14,7 @@ run :-
                            json_read_dict(Stream, Request),
                            close(Stream)),
         request_problem(Request, Courses, Today, Settings),
-        (   call_with_time_limit(
+        (   solve_within(
                 25,
                 once(schedule(Courses, Today, Settings,
                               Entries, Conflicts, Score))
@@ -30,7 +30,20 @@ run :-
         ;   throw(error(domain_error(feasible_schedule, Request), _))
         ).
 
-report_error(time_limit_exceeded) :-
+/*  call_with_time_limit/2 throws time_limit_exceeded, which
+    library(clpfd)'s optimise/3 catches and absorbs, so a solve could
+    keep running long past the limit. An alarm throwing a custom term
+    propagates through clpfd unharmed. remove(false) keeps the alarm
+    identifier valid so that remove_alarm/1 in the cleanup succeeds
+    whether or not the alarm has fired.
+*/
+solve_within(Seconds, Goal) :-
+        setup_call_cleanup(
+            alarm(Seconds, throw(aliahan_timeout), Id, [remove(false)]),
+            Goal,
+            remove_alarm(Id)).
+
+report_error(aliahan_timeout) :-
         format(user_error,
                'SWI-Prolog scheduler did not finish within 25 seconds~n', []),
         halt(1).

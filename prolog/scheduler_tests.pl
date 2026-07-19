@@ -148,6 +148,25 @@ test(crosses_a_leap_day) :-
         maplist(entry_date, Entries, Dates),
         Dates = [date(2028,2,28),date(2028,2,29),date(2028,3,1)].
 
+test(relaxes_peak_when_its_lower_bound_is_unreachable) :-
+        Courses = [course(a, date(2026,3,19), [], [a1,a2,a3]),
+                   course(b, date(2026,3,22), [], [b1])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 0),
+                      Entries, score(2, 3, _))),
+        Entries = [entry(a, a1, date(2026,3,19), 0),
+                   entry(a, a2, date(2026,3,19), 1),
+                   entry(a, a3, date(2026,3,19), 2),
+                   entry(b, b1, date(2026,3,20), 0)].
+
+test(falls_back_to_plain_labeling_beyond_the_relaxation_ladder) :-
+        Courses = [course(a, date(2026,3,19), [], [a1,a2,a3,a4,a5,a6]),
+                   course(b, date(2026,3,25), [], [b1])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 0),
+                      Entries, score(Overlaps, Peak, _))),
+        length(Entries, 7),
+        Overlaps >= 5,
+        Peak >= 6.
+
 test(rejects_a_prerequisite_chain_without_enough_days, [fail]) :-
         Courses = [course(a, date(2026,3,19), [], [a1]),
                    course(b, date(2026,3,19), [a], [b1])],

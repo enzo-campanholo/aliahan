@@ -17,6 +17,7 @@
 
 :- use_module(library(clpfd)).
 :- use_module(library(pairs)).
+:- use_module(library(time)).
 
 
 schedule(Courses, Today, Settings, Entries) :-
@@ -42,11 +43,42 @@ schedule_model(Courses, Today, Settings,
         schedule_model_(Schedulable, Eligible, Today, Settings,
                         Plans, Days, Vars, Score).
 
+/*  Branch-and-bound over all three objectives at once restarts the
+    whole search for every 1-unit improvement and can take hours on
+    larger instances. The model already posts tight lower bounds for
+    Overlaps and Peak, so search instead pins both to their infima
+    (relaxing them in small steps if pinning turns out infeasible) and
+    only minimizes the spacing error, with plain labeling as a
+    terminating last resort.
+*/
 optimize([], score(0, 0, 0)).
 optimize(Vars, score(Overlaps, Peak, Spacing)) :-
         Vars = [_|_],
-        once(labeling([ffc,bisect,
-                       min(Overlaps),min(Peak),min(Spacing)], Vars)).
+        fd_inf(Overlaps, OverlapInf),
+        fd_inf(Peak, PeakInf),
+        once(bounded_labeling(Vars, Overlaps, Peak, Spacing,
+                              OverlapInf, PeakInf)).
+
+bounded_labeling(Vars, Overlaps, Peak, Spacing, OverlapInf, PeakInf) :-
+        member(OverlapSlack-PeakSlack, [0-0,0-1,0-2,1-2,2-2]),
+        Overlaps #=< OverlapInf + OverlapSlack,
+        Peak #=< PeakInf + PeakSlack,
+        spacing_search(Vars, Spacing).
+bounded_labeling(Vars, _, _, _, _, _) :-
+        labeling([ffc,bisect], Vars).
+
+/*  library(clpfd)'s optimise/3 catches time_limit_exceeded and treats
+    it as "accept the best value found so far", so with a single min/1
+    objective this is an anytime search: it yields the best spacing
+    found within the limit, and fails if the limit expires before any
+    solution is found (or the current bounds are infeasible).
+*/
+spacing_search(Vars, Spacing) :-
+        catch(call_with_time_limit(
+                  2,
+                  once(labeling([ffc,bisect,min(Spacing)], Vars))),
+              time_limit_exceeded,
+              fail).
 
 schedule_model_([], _, _, _, [], [], [], score(0, 0, 0)).
 schedule_model_([Course|Courses], AllCourses, Today, Settings,

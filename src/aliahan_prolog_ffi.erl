@@ -68,18 +68,25 @@ run_port(Executable, Runner, InputPath) ->
         [binary, exit_status, use_stdio, stderr_to_stdout,
          {args, ["-q", "-s", Runner, "--", InputPath]}]
     ),
-    collect(Port, []).
+    collect(Port, os_pid(Port), []).
 
-collect(Port, Chunks) ->
+os_pid(Port) ->
+    case erlang:port_info(Port, os_pid) of
+        {os_pid, OsPid} -> OsPid;
+        _ -> undefined
+    end.
+
+collect(Port, OsPid, Chunks) ->
     receive
         {Port, {data, Data}} ->
-            collect(Port, [Data | Chunks]);
+            collect(Port, OsPid, [Data | Chunks]);
         {Port, {exit_status, 0}} ->
             {ok, iolist_to_binary(lists:reverse(Chunks))};
         {Port, {exit_status, Status}} ->
             Output = iolist_to_binary(lists:reverse(Chunks)),
             {error, failure_message(Status, Output)}
     after 30000 ->
+        kill_os_process(OsPid),
         _ = try port_close(Port) of
             _ -> ok
         catch
@@ -87,6 +94,14 @@ collect(Port, Chunks) ->
         end,
         {error, <<"SWI-Prolog did not finish within 30 seconds">>}
     end.
+
+%% port_close/1 only closes the pipes; without an explicit kill the
+%% swipl process keeps running.
+kill_os_process(undefined) ->
+    ok;
+kill_os_process(OsPid) ->
+    _ = os:cmd("kill -9 " ++ integer_to_list(OsPid)),
+    ok.
 
 failure_message(Status, <<>>) ->
     iolist_to_binary(io_lib:format(
