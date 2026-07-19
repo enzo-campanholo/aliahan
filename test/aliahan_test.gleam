@@ -606,6 +606,28 @@ pub fn course_module_ranges_are_bounded_in_the_store_test() {
   })
 }
 
+pub fn duplicate_names_are_rejected_as_validation_errors_test() {
+  with_isolated_store("duplicate_names_are_rejected", fn(_, _) {
+    let assert Ok(Nil) = store.initialise()
+    let assert Ok(Nil) = store.create_vendor("Vendor")
+    let assert Error(model.Validation(_)) = store.create_vendor("Vendor")
+
+    let vendor = vendor_named("Vendor")
+    let new_course = fn(name) {
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: name,
+        deadline: calendar.Date(2026, calendar.December, 1),
+        prerequisites: [],
+        modules: model.ExplicitModules(["Only module"]),
+      ))
+    }
+    let assert Ok(Nil) = new_course("Course")
+    let assert Error(model.Validation(_)) = new_course("Course")
+    Nil
+  })
+}
+
 pub fn duplicate_prerequisite_names_are_stored_once_test() {
   with_isolated_store("duplicate_prerequisites", fn(_, _) {
     let assert Ok(Nil) = store.initialise()

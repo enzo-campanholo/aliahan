@@ -246,18 +246,10 @@ pub fn update_course(
     use #(vendor_id, current_name, current_deadline, current_prerequisites) <- result.try(
       load_course_update_state(connection, course_id),
     )
-    let next_name = case input.name {
-      Some(name) -> name
-      None -> current_name
-    }
-    let next_deadline = case input.deadline {
-      Some(deadline) -> deadline
-      None -> current_deadline
-    }
-    let next_prerequisites = case input.prerequisites {
-      Some(prerequisites) -> prerequisites
-      None -> current_prerequisites
-    }
+    let next_name = option.unwrap(input.name, current_name)
+    let next_deadline = option.unwrap(input.deadline, current_deadline)
+    let next_prerequisites =
+      option.unwrap(input.prerequisites, current_prerequisites)
     use name <- result.try(validate_name(next_name, "Course name"))
     let deadline = date.to_iso(next_deadline)
     use prerequisite_ids <- result.try(resolve_prerequisites(
@@ -401,13 +393,11 @@ pub fn update_module(
       None -> Ok(Nil)
     })
     use _ <- result.try(case validated_name, order_changed {
-      Some(_), _ -> clear_course_range(connection, course_id)
-      None, True -> clear_course_range(connection, course_id)
+      Some(_), _ | None, True -> clear_course_range(connection, course_id)
       None, False -> Ok(Nil)
     })
     Ok(schedule_mutation_for_module_update(
       module_id,
-      validated_name,
       completed,
       order_changed,
       schedule_is_current,
@@ -482,17 +472,8 @@ fn with_db(
   )
   let outcome = action(connection)
   let close_result = sqlight.close(connection) |> result.map_error(sql_error)
-  case outcome {
-    Ok(value) ->
-      case close_result {
-        Ok(_) -> Ok(value)
-        Error(error) -> Error(error)
-      }
-    Error(error) -> {
-      let _ = close_result
-      Error(error)
-    }
-  }
+  use value <- result.try(outcome)
+  result.replace(close_result, value)
 }
 
 fn prepare_schema(connection: sqlight.Connection) -> Result(Nil, AppError) {
@@ -756,15 +737,16 @@ fn set_schedule_generated_for(
 }
 
 fn merge_settings(current: Settings, patch: SettingsPatch) -> Settings {
-  let include_weekends = case patch.include_weekends {
-    Some(include_weekends) -> include_weekends
-    None -> current.include_weekends
-  }
-  let deadline_slack_days = case patch.deadline_slack_days {
-    Some(deadline_slack_days) -> deadline_slack_days
-    None -> current.deadline_slack_days
-  }
-  Settings(include_weekends:, deadline_slack_days:)
+  Settings(
+    include_weekends: option.unwrap(
+      patch.include_weekends,
+      current.include_weekends,
+    ),
+    deadline_slack_days: option.unwrap(
+      patch.deadline_slack_days,
+      current.deadline_slack_days,
+    ),
+  )
 }
 
 fn load_course_update_state(
@@ -878,17 +860,11 @@ fn load_vendors(
     connection,
   ))
 
-  let prerequisite_ids =
+  let prerequisites =
     prerequisite_rows
     |> list.fold(dict.new(), fn(acc, row) {
       let existing = dict.get(acc, row.0) |> result.unwrap([])
-      dict.insert(acc, row.0, [row.1, ..existing])
-    })
-  let prerequisite_names =
-    prerequisite_rows
-    |> list.fold(dict.new(), fn(acc, row) {
-      let existing = dict.get(acc, row.0) |> result.unwrap([])
-      dict.insert(acc, row.0, [row.2, ..existing])
+      dict.insert(acc, row.0, [#(row.1, row.2), ..existing])
     })
   let modules =
     module_rows
@@ -904,13 +880,8 @@ fn load_vendors(
       |> list.filter(fn(course) { course.1 == row.0 })
       |> list.try_map(fn(course_row) {
         use deadline <- result.try(date.parse_iso(course_row.4))
-        let prerequisite_id_list =
-          prerequisite_ids
-          |> dict.get(course_row.0)
-          |> result.unwrap([])
-          |> list.reverse
-        let prerequisite_name_list =
-          prerequisite_names
+        let course_prerequisites =
+          prerequisites
           |> dict.get(course_row.0)
           |> result.unwrap([])
           |> list.reverse
@@ -922,8 +893,8 @@ fn load_vendors(
           vendor_name: course_row.2,
           name: course_row.3,
           deadline: deadline,
-          prerequisites: prerequisite_name_list,
-          prerequisite_ids: prerequisite_id_list,
+          prerequisites: list.map(course_prerequisites, fn(pair) { pair.1 }),
+          prerequisite_ids: list.map(course_prerequisites, fn(pair) { pair.0 }),
           module_range: module_range_from_row(course_row),
           modules: course_modules,
         ))
@@ -937,11 +908,7 @@ fn load_courses(
   connection: sqlight.Connection,
 ) -> Result(List(Course), AppError) {
   use vendors <- result.try(load_vendors(connection))
-  Ok(
-    vendors
-    |> list.fold([], fn(acc, vendor) { list.append(vendor.courses, acc) })
-    |> list.reverse,
-  )
+  Ok(list.flat_map(vendors, fn(vendor) { vendor.courses }))
 }
 
 fn decorate_vendors_with_schedule(
@@ -957,19 +924,11 @@ fn decorate_vendors_with_schedule(
   vendors
   |> list.map(fn(vendor) {
     Vendor(
-      id: vendor.id,
-      name: vendor.name,
+      ..vendor,
       courses: vendor.courses
         |> list.map(fn(course) {
           Course(
-            id: course.id,
-            vendor_id: course.vendor_id,
-            vendor_name: course.vendor_name,
-            name: course.name,
-            deadline: course.deadline,
-            prerequisites: course.prerequisites,
-            prerequisite_ids: course.prerequisite_ids,
-            module_range: course.module_range,
+            ..course,
             modules: course.modules
               |> list.map(fn(module) {
                 decorate_module_with_schedule(module, entries_by_module)
@@ -987,24 +946,11 @@ fn decorate_module_with_schedule(
   case dict.get(entries_by_module, module.id) {
     Ok(entry) ->
       Module(
-        id: module.id,
-        course_id: module.course_id,
-        position: module.position,
-        name: module.name,
-        completed_at: module.completed_at,
+        ..module,
         scheduled_date: Some(entry.scheduled_date),
         slot_index: Some(entry.slot_index),
       )
-    Error(_) ->
-      Module(
-        id: module.id,
-        course_id: module.course_id,
-        position: module.position,
-        name: module.name,
-        completed_at: module.completed_at,
-        scheduled_date: None,
-        slot_index: None,
-      )
+    Error(_) -> Module(..module, scheduled_date: None, slot_index: None)
   }
 }
 
@@ -1110,15 +1056,15 @@ fn insert_course_row(
       sqlight.text(deadline),
       sqlight.nullable(
         sqlight.text,
-        option_map(module_range, fn(range) { range.prefix }),
+        option.map(module_range, fn(range) { range.prefix }),
       ),
       sqlight.nullable(
         sqlight.int,
-        option_map(module_range, fn(range) { range.start }),
+        option.map(module_range, fn(range) { range.start }),
       ),
       sqlight.nullable(
         sqlight.int,
-        option_map(module_range, fn(range) { range.end }),
+        option.map(module_range, fn(range) { range.end }),
       ),
     ],
     connection,
@@ -1274,32 +1220,13 @@ fn validate_module_order(
   current_module_ids: List(Int),
   ordered_module_ids: List(Int),
 ) -> Result(Nil, AppError) {
-  let invalid_message = "Module order must include every module exactly once"
-
-  case list.length(current_module_ids) == list.length(ordered_module_ids) {
-    False -> Error(Validation(invalid_message))
-    True -> {
-      let remaining =
-        current_module_ids
-        |> list.fold(dict.new(), fn(acc, module_id) {
-          dict.insert(acc, module_id, True)
-        })
-
-      use remaining <- result.try(
-        ordered_module_ids
-        |> list.try_fold(remaining, fn(acc, module_id) {
-          case dict.has_key(acc, module_id) {
-            True -> Ok(dict.delete(acc, module_id))
-            False -> Error(Validation(invalid_message))
-          }
-        }),
-      )
-
-      case dict.size(remaining) == 0 {
-        True -> Ok(Nil)
-        False -> Error(Validation(invalid_message))
-      }
-    }
+  case
+    list.sort(current_module_ids, int.compare)
+    == list.sort(ordered_module_ids, int.compare)
+  {
+    True -> Ok(Nil)
+    False ->
+      Error(Validation("Module order must include every module exactly once"))
   }
 }
 
@@ -1505,7 +1432,9 @@ fn module_from_row(
     position: row.2,
     name: row.3,
     completed_at: row.4,
-    scheduled_date: option_then(row.5, date.parse_iso),
+    scheduled_date: option.then(row.5, fn(text) {
+      date.parse_iso(text) |> option.from_result
+    }),
     slot_index: row.6,
   )
 }
@@ -1529,28 +1458,10 @@ fn module_range_from_row(
   }
 }
 
-fn option_then(
-  value: Option(a),
-  fun: fn(a) -> Result(b, AppError),
-) -> Option(b) {
-  case value {
-    Some(value) ->
-      case fun(value) {
-        Ok(parsed) -> Some(parsed)
-        Error(_) -> None
-      }
-    None -> None
-  }
-}
-
 fn range_inclusive(start: Int, finish: Int) -> List(Int) {
   case start > finish {
     True -> []
-    False ->
-      int.range(from: start, to: finish + 1, with: [], run: fn(acc, number) {
-        [number, ..acc]
-      })
-      |> list.reverse
+    False -> int.range(from: finish, to: start - 1, with: [], run: list.prepend)
   }
 }
 
@@ -1563,7 +1474,6 @@ fn completed_at_value(done: Bool) -> Option(String) {
 
 fn schedule_mutation_for_module_update(
   module_id: Int,
-  validated_name: Option(String),
   completed: Option(Bool),
   order_changed: Bool,
   schedule_is_current: Bool,
@@ -1586,11 +1496,7 @@ fn schedule_mutation_for_module_update(
                 _, _ -> RebuildStoredSchedule
               }
           }
-        None ->
-          case validated_name {
-            Some(_) -> KeepStoredSchedule
-            None -> KeepStoredSchedule
-          }
+        None -> KeepStoredSchedule
       }
   }
 }
@@ -1808,7 +1714,10 @@ fn ensure_app_settings_column(
 }
 
 fn sql_error(error: sqlight.Error) -> AppError {
-  Database("SQLite error: " <> error.message)
+  case error.code {
+    sqlight.ConstraintUnique -> Validation("That name is already in use")
+    _ -> Database("SQLite error: " <> error.message)
+  }
 }
 
 fn file_error(error: simplifile.FileError) -> AppError {
@@ -1848,13 +1757,6 @@ fn derive_courses_toml_path(database_path: String) -> String {
     |> filepath.base_name
 
   filepath.join(directory, stem <> ".courses.toml")
-}
-
-fn option_map(value: Option(a), fun: fn(a) -> b) -> Option(b) {
-  case value {
-    Some(value) -> Some(fun(value))
-    None -> None
-  }
 }
 
 const schema_sql = "

@@ -292,11 +292,11 @@ fn toml_string_array(values: List(String)) -> String {
 }
 
 fn toml_string(value: String) -> String {
-  "\""
-  <> value
-  |> string.replace(each: "\\", with: "\\\\")
-  |> string.replace(each: "\"", with: "\\\"")
-  |> fn(escaped) { escaped <> "\"" }
+  let escaped =
+    value
+    |> string.replace(each: "\\", with: "\\\\")
+    |> string.replace(each: "\"", with: "\\\"")
+  "\"" <> escaped <> "\""
 }
 
 fn sort_vendors(vendors: List(model.Vendor)) -> List(model.Vendor) {

@@ -322,10 +322,6 @@ document.addEventListener("alpine:init", () => {
       return parseInt(dateStr.split("-")[2], 10);
     },
 
-    isToday(dateStr) {
-      return dateStr === Alpine.store("app").today();
-    },
-
     isScheduleStart(dateStr) {
       return dateStr === Alpine.store("app").scheduleStartValue();
     },
@@ -657,16 +653,14 @@ document.addEventListener("alpine:init", () => {
   // Course card (manage tab)
   // Uses reactive getters to always read fresh data from the store,
   // avoiding stale closure references after refresh().
-  Alpine.data("courseCard", (initCourse, initVendor) => ({
+  Alpine.data("courseCard", (initCourse) => ({
     _courseId: initCourse.id,
-    _vendorId: initVendor.id,
     editing: { name: false, deadline: false, prerequisites: false },
     prerequisiteDraft: "",
     editingModuleId: null,
     moduleNameDraft: "",
     newModuleName: "",
     _dragIndex: null,
-    _draggedId: null,
     _dragSnapshot: null,
     _dropHandled: false,
     _saving: false,
@@ -683,12 +677,6 @@ document.addEventListener("alpine:init", () => {
       return null;
     },
 
-    get vendor() {
-      const data = Alpine.store("app").data;
-      if (!data) return null;
-      return data.vendors.find((v) => v.id === this._vendorId) || null;
-    },
-
     dragStart(event, index) {
       if (this._saving) {
         event.preventDefault();
@@ -697,7 +685,6 @@ document.addEventListener("alpine:init", () => {
       const course = this.course;
       if (!course) return;
       this._dragIndex = index;
-      this._draggedId = course.modules[index]?.id;
       this._dragSnapshot = course.modules.slice();
       this._dropHandled = false;
       event.dataTransfer.effectAllowed = "move";
@@ -755,7 +742,6 @@ document.addEventListener("alpine:init", () => {
         this.restoreDragSnapshot();
       }
       this._dragIndex = null;
-      this._draggedId = null;
       if (!this._saving) {
         this._dragSnapshot = null;
         this._dropHandled = false;

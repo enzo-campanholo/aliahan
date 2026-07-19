@@ -45,21 +45,28 @@ pub fn handle(request: wisp.Request, priv_dir: String) -> wisp.Response {
 }
 
 fn handle_bootstrap(request: wisp.Request) -> wisp.Response {
-  case request_schedule(request) {
-    Ok(#(view, anchor, schedule_start)) ->
-      case store.bootstrap(view, anchor, schedule_start) {
-        Ok(data) -> json_ok(encode_bootstrap(data))
-        Error(error) -> app_error(error)
-      }
-    Error(message) -> wisp.bad_request(message)
-  }
+  handle_schedule_query(request, fn(view, anchor, schedule_start) {
+    store.bootstrap(view, anchor, schedule_start)
+    |> result.map(encode_bootstrap)
+  })
 }
 
 fn handle_schedule(request: wisp.Request) -> wisp.Response {
+  handle_schedule_query(request, fn(view, anchor, schedule_start) {
+    store.schedule_view(view, anchor, schedule_start)
+    |> result.map(encode_schedule)
+  })
+}
+
+fn handle_schedule_query(
+  request: wisp.Request,
+  load: fn(String, calendar.Date, Option(calendar.Date)) ->
+    Result(json.Json, model.AppError),
+) -> wisp.Response {
   case request_schedule(request) {
     Ok(#(view, anchor, schedule_start)) ->
-      case store.schedule_view(view, anchor, schedule_start) {
-        Ok(schedule) -> json_ok(encode_schedule(schedule))
+      case load(view, anchor, schedule_start) {
+        Ok(payload) -> json_ok(payload)
         Error(error) -> app_error(error)
       }
     Error(message) -> wisp.bad_request(message)
@@ -72,44 +79,28 @@ fn patch_settings(body: Dynamic) -> wisp.Response {
       wisp.bad_request(
         "Settings patch must include at least one updatable field",
       )
-    Ok(settings) ->
-      case store.set_settings(settings) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+    Ok(settings) -> mutation_response(store.set_settings(settings))
     Error(_) -> wisp.bad_request("Invalid settings payload")
   }
 }
 
 fn create_vendor(body: Dynamic) -> wisp.Response {
   case decode.run(body, name_decoder()) {
-    Ok(name) ->
-      case store.create_vendor(name) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+    Ok(name) -> mutation_response(store.create_vendor(name))
     Error(_) -> wisp.bad_request("Invalid vendor payload")
   }
 }
 
 fn delete_vendor(vendor_id: String) -> wisp.Response {
   case parse_id(vendor_id) {
-    Ok(vendor_id) ->
-      case store.delete_vendor(vendor_id) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+    Ok(vendor_id) -> mutation_response(store.delete_vendor(vendor_id))
     Error(message) -> wisp.bad_request(message)
   }
 }
 
 fn create_course(body: Dynamic) -> wisp.Response {
   case decode.run(body, new_course_decoder()) {
-    Ok(input) ->
-      case store.create_course(input) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+    Ok(input) -> mutation_response(store.create_course(input))
     Error(_) -> wisp.bad_request("Invalid course payload")
   }
 }
@@ -125,10 +116,7 @@ fn update_course(course_id: String, body: Dynamic) -> wisp.Response {
     ->
       wisp.bad_request("Course patch must include at least one updatable field")
     Ok(course_id), Ok(input) ->
-      case store.update_course(course_id, input) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+      mutation_response(store.update_course(course_id, input))
     Error(message), _ -> wisp.bad_request(message)
     _, Error(_) -> wisp.bad_request("Invalid course payload")
   }
@@ -136,11 +124,7 @@ fn update_course(course_id: String, body: Dynamic) -> wisp.Response {
 
 fn delete_course(course_id: String) -> wisp.Response {
   case parse_id(course_id) {
-    Ok(course_id) ->
-      case store.delete_course(course_id) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+    Ok(course_id) -> mutation_response(store.delete_course(course_id))
     Error(message) -> wisp.bad_request(message)
   }
 }
@@ -148,10 +132,7 @@ fn delete_course(course_id: String) -> wisp.Response {
 fn add_module(course_id: String, body: Dynamic) -> wisp.Response {
   case parse_id(course_id), decode.run(body, name_decoder()) {
     Ok(course_id), Ok(name) ->
-      case store.add_module(course_id, name) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+      mutation_response(store.add_module(course_id, name))
     Error(message), _ -> wisp.bad_request(message)
     _, Error(_) -> wisp.bad_request("Invalid module payload")
   }
@@ -162,10 +143,12 @@ fn patch_module(module_id: String, body: Dynamic) -> wisp.Response {
     Ok(_), Ok(#(None, None, None)) ->
       wisp.bad_request("Module patch must include at least one updatable field")
     Ok(module_id), Ok(#(name, completed, position)) ->
-      case store.update_module(module_id, name, completed, position) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+      mutation_response(store.update_module(
+        module_id,
+        name,
+        completed,
+        position,
+      ))
     Error(message), _ -> wisp.bad_request(message)
     _, Error(_) -> wisp.bad_request("Invalid module payload")
   }
@@ -174,10 +157,7 @@ fn patch_module(module_id: String, body: Dynamic) -> wisp.Response {
 fn reorder_course_modules(course_id: String, body: Dynamic) -> wisp.Response {
   case parse_id(course_id), decode.run(body, module_reorder_decoder()) {
     Ok(course_id), Ok(module_ids) ->
-      case store.reorder_modules(course_id, module_ids) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+      mutation_response(store.reorder_modules(course_id, module_ids))
     Error(message), _ -> wisp.bad_request(message)
     _, Error(_) -> wisp.bad_request("Invalid module reorder payload")
   }
@@ -185,12 +165,15 @@ fn reorder_course_modules(course_id: String, body: Dynamic) -> wisp.Response {
 
 fn delete_module(module_id: String) -> wisp.Response {
   case parse_id(module_id) {
-    Ok(module_id) ->
-      case store.delete_module(module_id) {
-        Ok(_) -> json_ok(success_json())
-        Error(error) -> app_error(error)
-      }
+    Ok(module_id) -> mutation_response(store.delete_module(module_id))
     Error(message) -> wisp.bad_request(message)
+  }
+}
+
+fn mutation_response(outcome: Result(Nil, model.AppError)) -> wisp.Response {
+  case outcome {
+    Ok(_) -> json_ok(json.object([#("updated", json.bool(True))]))
+    Error(error) -> app_error(error)
   }
 }
 
@@ -205,10 +188,12 @@ fn request_schedule(
     "Anchor date",
     date.today(),
   ))
-  case optional_date_query(query, "start", "Start date") {
-    Ok(schedule_start) -> Ok(#(view, anchor, schedule_start))
-    Error(message) -> Error(message)
-  }
+  use schedule_start <- result.try(optional_date_query(
+    query,
+    "start",
+    "Start date",
+  ))
+  Ok(#(view, anchor, schedule_start))
 }
 
 fn view_query(query: List(#(String, String))) -> Result(String, String) {
@@ -292,53 +277,36 @@ fn new_course_decoder() -> decode.Decoder(model.NewCourseInput) {
     let course_modules = case module_range, modules {
       Some(range), [] -> Ok(model.GeneratedRange(range))
       None, [_, ..] -> Ok(model.ExplicitModules(modules))
-      Some(_), [_, ..] ->
-        Error(model.NewCourseInput(
-          vendor_id: 0,
-          name: "",
-          deadline: date.today(),
-          prerequisites: [],
-          modules: model.ExplicitModules([]),
-        ))
-      None, [] ->
-        Error(model.NewCourseInput(
-          vendor_id: 0,
-          name: "",
-          deadline: date.today(),
-          prerequisites: [],
-          modules: model.ExplicitModules([]),
-        ))
+      Some(_), [_, ..] | None, [] -> Error(Nil)
     }
-    case date.parse_iso(deadline_text) {
-      Ok(deadline) ->
-        case course_modules {
-          Ok(course_modules) ->
-            decode.success(model.NewCourseInput(
-              vendor_id: vendor_id,
-              name: name,
-              deadline: deadline,
-              prerequisites: prerequisites,
-              modules: course_modules,
-            ))
-          Error(placeholder) ->
-            decode.failure(
-              placeholder,
-              expected: "modules array or module_range object",
-            )
-        }
-      Error(_) ->
+    case date.parse_iso(deadline_text), course_modules {
+      Ok(deadline), Ok(course_modules) ->
+        decode.success(model.NewCourseInput(
+          vendor_id: vendor_id,
+          name: name,
+          deadline: deadline,
+          prerequisites: prerequisites,
+          modules: course_modules,
+        ))
+      Error(_), _ ->
+        decode.failure(placeholder_course_input(), expected: "YYYY-MM-DD date")
+      _, Error(_) ->
         decode.failure(
-          model.NewCourseInput(
-            vendor_id: 0,
-            name: "",
-            deadline: date.today(),
-            prerequisites: [],
-            modules: model.ExplicitModules([]),
-          ),
-          expected: "YYYY-MM-DD date",
+          placeholder_course_input(),
+          expected: "modules array or module_range object",
         )
     }
   }
+}
+
+fn placeholder_course_input() -> model.NewCourseInput {
+  model.NewCourseInput(
+    vendor_id: 0,
+    name: "",
+    deadline: date.today(),
+    prerequisites: [],
+    modules: model.ExplicitModules([]),
+  )
 }
 
 fn update_course_decoder() -> decode.Decoder(model.UpdateCourseInput) {
@@ -457,10 +425,6 @@ fn json_ok(payload: json.Json) -> wisp.Response {
     ),
     200,
   )
-}
-
-fn success_json() -> json.Json {
-  json.object([#("updated", json.bool(True))])
 }
 
 fn encode_bootstrap(data: model.BootstrapData) -> json.Json {
@@ -866,7 +830,7 @@ fn index_html() -> String {
           <!-- Week view -->
           <template x-if=\"$store.app.view === 'week'\">
             <div class=\"grid grid-cols-7 border-3 border-ink\" style=\"min-height: calc(40vh - 40px)\">
-              <template x-for=\"(day, i) in schedule?.days || []\" :key=\"day.date\">
+              <template x-for=\"day in schedule?.days || []\" :key=\"day.date\">
                 <div class=\"border-r-3 border-ink last:border-r-0 flex flex-col\" :class=\"isScheduleStart(day.date) ? 'bg-yellow/10' : 'bg-surface'\">
                   <div class=\"px-3 py-2 border-b-3 border-ink text-center\" :class=\"isScheduleStart(day.date) ? 'bg-yellow' : 'bg-surface'\">
                     <div class=\"font-heading font-bold text-sm uppercase\" x-text=\"dayLabel(day.date)\"></div>
@@ -913,7 +877,7 @@ fn index_html() -> String {
                       <span class=\"text-sm font-heading font-bold tabular-nums\" x-text=\"dayNum(day.date)\"></span>
                     </div>
                     <div class=\"px-1.5 pb-1.5 flex flex-col gap-1\">
-                      <template x-for=\"(entry, ei) in day.entries.slice(0, 2)\" :key=\"entry.module_id\">
+                      <template x-for=\"entry in day.entries.slice(0, 2)\" :key=\"entry.module_id\">
                         <div
                           class=\"flex items-stretch text-xs leading-snug border-3 border-ink bg-surface cursor-pointer transition-[transform,box-shadow] duration-150 hover:shadow-[2px_2px_0px_#1A1A1A] hover:translate-x-[-1px] hover:translate-y-[-1px]\"
                           @click=\"openPopover(day.entries, entry)\"
@@ -1158,8 +1122,8 @@ fn index_html() -> String {
                   </div>
 
                   <!-- Course cards -->
-                  <template x-for=\"(course, ci) in vendor.courses\" :key=\"course.id\">
-                    <div class=\"p-5 border-t-3 border-ink\" x-data=\"courseCard(course, vendor)\">
+                  <template x-for=\"course in vendor.courses\" :key=\"course.id\">
+                    <div class=\"p-5 border-t-3 border-ink\" x-data=\"courseCard(course)\">
                       <div class=\"flex items-center justify-between gap-3 mb-4\">
                         <!-- Course name (inline edit) -->
                         <div class=\"flex-1 min-w-0\">
@@ -1245,7 +1209,7 @@ fn index_html() -> String {
                       </div>
 
                       <!-- Module list (drag-reorderable) -->
-                      <div class=\"flex flex-col gap-1.5\" x-ref=\"moduleList\">
+                      <div class=\"flex flex-col gap-1.5\">
                         <template x-for=\"(mod, mi) in course.modules\" :key=\"mod.id\">
                           <div
                             class=\"flex items-center gap-3 group text-base py-2 px-3 -mx-3 border-3 border-transparent hover:border-ink/10 transition-[background-color,border-color] duration-150 select-none\"

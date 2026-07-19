@@ -658,13 +658,10 @@ fn activity_penalty_from_dates(
     [] -> penalty + { current_run * current_run }
     [_day] -> penalty + { current_run + 1 } * { current_run + 1 }
     [left, right, ..rest] -> {
-      let next_run = case idle_gap_size(left, right, settings) == 0 {
-        True -> current_run + 1
-        False -> 0
-      }
-      let next_penalty = case idle_gap_size(left, right, settings) == 0 {
-        True -> penalty
-        False -> penalty + { current_run + 1 } * { current_run + 1 }
+      let run_continues = idle_gap_size(left, right, settings) == 0
+      let #(next_run, next_penalty) = case run_continues {
+        True -> #(current_run + 1, penalty)
+        False -> #(0, penalty + { current_run + 1 } * { current_run + 1 })
       }
       activity_penalty_from_dates(
         [right, ..rest],
@@ -870,15 +867,9 @@ fn day_is_idle(
   placements: List(Placement),
   scheduled_date: calendar.Date,
 ) -> Bool {
-  case
-    placements
-    |> list.any(fn(placement) {
-      date.compare(placement.scheduled_date, scheduled_date) == Eq
-    })
-  {
-    True -> False
-    False -> True
-  }
+  !list.any(placements, fn(placement) {
+    date.compare(placement.scheduled_date, scheduled_date) == Eq
+  })
 }
 
 fn compare_module_order(
@@ -938,17 +929,10 @@ fn next_module_date(
   placements: List(Placement),
 ) -> Option(calendar.Date) {
   case module_ids {
+    [current_id, next_id, ..] if current_id == module_id ->
+      Some(scheduled_date_for_module(placements, next_id))
+    [_, ..rest] -> next_module_date(rest, module_id, placements)
     [] -> None
-    [current_id, next_id, ..] ->
-      case current_id == module_id {
-        True -> Some(scheduled_date_for_module(placements, next_id))
-        False ->
-          case module_ids {
-            [_, ..rest] -> next_module_date(rest, module_id, placements)
-            [] -> None
-          }
-      }
-    [_] -> None
   }
 }
 
@@ -1168,7 +1152,7 @@ fn place_modules(
         effective_target_day_count(preferred_day_count, day_count, module_count)
       let target_index =
         target_day_index(module_index, module_count, target_day_count)
-        |> max_int(min_index)
+        |> int.max(min_index)
       let overlaps_required = module_count > target_day_count
       let chosen_index =
         choose_day_index(
@@ -1406,8 +1390,8 @@ fn compare_distance_then_left(
   right: Int,
   target_index: Int,
 ) -> Bool {
-  let left_distance = abs_int(left - target_index)
-  let right_distance = abs_int(right - target_index)
+  let left_distance = int.absolute_value(left - target_index)
+  let right_distance = int.absolute_value(right - target_index)
 
   case int.compare(left_distance, right_distance) {
     Lt -> True
@@ -1424,8 +1408,8 @@ fn better_overlap_index(
   allowed_days: List(calendar.Date),
   occupancy: dict.Dict(String, Int),
 ) -> Bool {
-  let left_distance = abs_int(left - target_index)
-  let right_distance = abs_int(right - target_index)
+  let left_distance = int.absolute_value(left - target_index)
+  let right_distance = int.absolute_value(right - target_index)
 
   case int.compare(left_distance, right_distance) {
     Lt -> True
@@ -1463,8 +1447,8 @@ fn better_balanced_index(
   allowed_days: List(calendar.Date),
   occupancy: dict.Dict(String, Int),
 ) -> Bool {
-  let left_distance = abs_int(left - target_index)
-  let right_distance = abs_int(right - target_index)
+  let left_distance = int.absolute_value(left - target_index)
+  let right_distance = int.absolute_value(right - target_index)
 
   case int.compare(left_distance, right_distance) {
     Lt -> True
@@ -1561,13 +1545,7 @@ fn prerequisites_scheduled(
   prerequisite_ids: List(Int),
   finished_dates: dict.Dict(Int, calendar.Date),
 ) -> Bool {
-  prerequisite_ids
-  |> list.all(fn(prerequisite_id) {
-    case dict.get(finished_dates, prerequisite_id) {
-      Ok(_) -> True
-      Error(_) -> False
-    }
-  })
+  list.all(prerequisite_ids, dict.has_key(finished_dates, _))
 }
 
 fn earliest_start_date(
@@ -1871,20 +1849,6 @@ fn date_for_index(days: List(calendar.Date), index: Int) -> calendar.Date {
     [day, ..], 0 -> day
     [_, ..rest], _ -> date_for_index(rest, index - 1)
     [], _ -> panic as "Invalid schedule day index"
-  }
-}
-
-fn abs_int(value: Int) -> Int {
-  case value < 0 {
-    True -> 0 - value
-    False -> value
-  }
-}
-
-fn max_int(left: Int, right: Int) -> Int {
-  case int.compare(left, right) {
-    Lt -> right
-    _ -> left
   }
 }
 
