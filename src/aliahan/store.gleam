@@ -18,7 +18,7 @@ import gleam/dynamic/decode
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/order.{Eq, Gt}
+import gleam/order.{Eq, Gt, Lt}
 import gleam/result
 import gleam/string
 import gleam/time/calendar
@@ -38,7 +38,7 @@ const max_modules_per_course = 1000
 type ScheduleMutation {
   KeepStoredSchedule
   RebuildStoredSchedule
-  RemoveStoredModuleFromSchedule(module_id: Int)
+  CompleteModuleInStoredSchedules(module_id: Int)
 }
 
 pub fn database_path() -> String {
@@ -65,14 +65,22 @@ pub fn initialise() -> Result(Nil, AppError) {
     use _ <- result.try(prepare_schema(connection))
 
     use contains_courses <- result.try(has_courses(connection))
+    let today = date.today()
 
     use _ <- result.try(case contains_courses {
       False ->
         case simplifile.is_file(courses_toml_path()) {
-          Ok(True) -> transactional(connection, import_from_toml)
-          _ -> transactional(connection, refresh_schedule_in_transaction)
+          Ok(True) ->
+            transactional(connection, fn(tx) { import_from_toml(tx, today) })
+          _ ->
+            transactional(connection, fn(tx) {
+              refresh_schedule_in_transaction(tx, today)
+            })
         }
-      True -> transactional(connection, refresh_schedule_in_transaction)
+      True ->
+        transactional(connection, fn(tx) {
+          ensure_schedule_in_transaction(tx, today)
+        })
     })
 
     let _ = export_snapshot(connection)
@@ -101,15 +109,29 @@ fn load_schedule_data(
 ) -> Result(ScheduleData, AppError) {
   case engine, schedule_start {
     GleamScheduler, None -> {
-      use #(conflicts, schedule_entries) <- result.try(transactional(
-        connection,
-        ensure_schedule_in_transaction,
-      ))
+      use #(conflicts, schedule_entries) <- result.try(
+        transactional(connection, fn(tx) {
+          ensure_schedule_in_transaction(tx, today)
+        }),
+      )
       Ok(ScheduleData(
         schedule_start: today,
         conflicts: conflicts,
         schedule_entries: schedule_entries,
         rebuilt: None,
+      ))
+    }
+    PrologScheduler, None -> {
+      use #(vendors, stored_entries, conflicts, schedule_entries) <- result.try(
+        transactional(connection, fn(tx) {
+          ensure_prolog_schedule_in_transaction(tx, today)
+        }),
+      )
+      Ok(ScheduleData(
+        schedule_start: today,
+        conflicts: conflicts,
+        schedule_entries: schedule_entries,
+        rebuilt: Some(#(vendors, stored_entries)),
       ))
     }
     engine, start -> {
@@ -188,7 +210,7 @@ pub fn schedule_view_with_scheduler(
 }
 
 pub fn set_settings(patch: SettingsPatch) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use current <- result.try(load_settings(connection))
     let settings = merge_settings(current, patch)
     case settings.deadline_slack_days < 0 {
@@ -213,7 +235,7 @@ pub fn set_settings(patch: SettingsPatch) -> Result(Nil, AppError) {
 }
 
 pub fn create_vendor(name: String) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use name <- result.try(validate_name(name, "Vendor name"))
     use _ <- result.try(exec_with_args(
       "insert into vendors (name) values (?)",
@@ -225,7 +247,7 @@ pub fn create_vendor(name: String) -> Result(Nil, AppError) {
 }
 
 pub fn delete_vendor(vendor_id: Int) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use _ <- result.try(ensure_vendor_exists(connection, vendor_id))
     use _ <- result.try(exec_with_args(
       "delete from vendors where id = ?",
@@ -237,7 +259,7 @@ pub fn delete_vendor(vendor_id: Int) -> Result(Nil, AppError) {
 }
 
 pub fn create_course(input: NewCourseInput) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use name <- result.try(validate_name(input.name, "Course name"))
     use _ <- result.try(ensure_vendor_exists(connection, input.vendor_id))
     let deadline = date.to_iso(input.deadline)
@@ -271,7 +293,7 @@ pub fn update_course(
   course_id: Int,
   input: UpdateCourseInput,
 ) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use #(vendor_id, current_name, current_deadline, current_prerequisites) <- result.try(
       load_course_update_state(connection, course_id),
     )
@@ -314,7 +336,7 @@ pub fn update_course(
 }
 
 pub fn delete_course(course_id: Int) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use _ <- result.try(course_vendor_id(connection, course_id))
     use _ <- result.try(exec_with_args(
       "delete from courses where id = ?",
@@ -326,7 +348,7 @@ pub fn delete_course(course_id: Int) -> Result(Nil, AppError) {
 }
 
 pub fn add_module(course_id: Int, name: String) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use _ <- result.try(course_vendor_id(connection, course_id))
     use name <- result.try(validate_name(name, "Module name"))
     use _ <- result.try(ensure_module_capacity(connection, course_id))
@@ -378,15 +400,11 @@ pub fn update_module(
   completed: Option(Bool),
   position: Option(Int),
 ) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
-    let today_iso = date.to_iso(date.today())
-    use #(course_id, current_completed_at, current_scheduled_date) <- result.try(
+  apply_mutation(fn(connection, today) {
+    let today_iso = date.to_iso(today)
+    use #(course_id, current_completed_at, _) <- result.try(
       load_module_update_state(connection, module_id),
     )
-    use schedule_is_current <- result.try(schedule_generated_for_date(
-      connection,
-      today_iso,
-    ))
     use validated_name <- result.try(validate_optional_name(name, "Module name"))
     use order_changed <- result.try(case position {
       Some(next_position) -> {
@@ -414,7 +432,7 @@ pub fn update_module(
         exec_with_args(
           "update modules set completed_at = ? where id = ?",
           [
-            sqlight.nullable(sqlight.text, completed_at_value(done)),
+            sqlight.nullable(sqlight.text, completed_at_value(done, today_iso)),
             sqlight.int(module_id),
           ],
           connection,
@@ -429,10 +447,7 @@ pub fn update_module(
       module_id,
       completed,
       order_changed,
-      schedule_is_current,
       current_completed_at,
-      current_scheduled_date,
-      today_iso,
     ))
   })
 }
@@ -441,7 +456,7 @@ pub fn reorder_modules(
   course_id: Int,
   module_ids: List(Int),
 ) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use _ <- result.try(course_vendor_id(connection, course_id))
     use changed <- result.try(apply_module_order(
       connection,
@@ -459,7 +474,7 @@ pub fn reorder_modules(
 }
 
 pub fn delete_module(module_id: Int) -> Result(Nil, AppError) {
-  apply_mutation(fn(connection) {
+  apply_mutation(fn(connection, _today) {
     use course_id <- result.try(module_course_id(connection, module_id))
     use _ <- result.try(exec_with_args(
       "delete from modules where id = ?",
@@ -473,14 +488,20 @@ pub fn delete_module(module_id: Int) -> Result(Nil, AppError) {
 }
 
 fn apply_mutation(
-  mutation: fn(sqlight.Connection) -> Result(ScheduleMutation, AppError),
+  mutation: fn(sqlight.Connection, calendar.Date) ->
+    Result(ScheduleMutation, AppError),
 ) -> Result(Nil, AppError) {
   with_db(fn(connection) {
     use _ <- result.try(enable_foreign_keys(connection))
+    let today = date.today()
     use _ <- result.try(
       transactional(connection, fn(tx) {
-        use schedule_mutation <- result.try(mutation(tx))
-        use _ <- result.try(apply_schedule_mutation(tx, schedule_mutation))
+        use schedule_mutation <- result.try(mutation(tx, today))
+        use _ <- result.try(apply_schedule_mutation(
+          tx,
+          schedule_mutation,
+          today,
+        ))
         Ok(Nil)
       }),
     )
@@ -549,6 +570,7 @@ fn transactional(
 
 fn import_from_toml(
   connection: sqlight.Connection,
+  today: calendar.Date,
 ) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
   use contents <- result.try(
     simplifile.read(courses_toml_path())
@@ -612,13 +634,13 @@ fn import_from_toml(
     }),
   )
 
-  refresh_schedule_in_transaction(connection)
+  refresh_schedule_in_transaction(connection, today)
 }
 
 fn refresh_schedule_in_transaction(
   connection: sqlight.Connection,
+  today: calendar.Date,
 ) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
-  let today = date.today()
   let today_iso = date.to_iso(today)
   use #(stored_entries, conflicts, schedule_entries) <- result.try(
     compute_schedule(connection, today),
@@ -634,12 +656,11 @@ fn refresh_schedule_in_transaction(
 
 fn ensure_schedule_in_transaction(
   connection: sqlight.Connection,
+  today: calendar.Date,
 ) -> Result(#(List(Conflict), List(ScheduleEntry)), AppError) {
-  let today = date.today()
-  let today_iso = date.to_iso(today)
-  use schedule_is_current <- result.try(schedule_generated_for_date(
+  use schedule_is_current <- result.try(reuse_stored_schedule_on(
     connection,
-    today_iso,
+    today,
   ))
   case schedule_is_current {
     True -> {
@@ -647,7 +668,53 @@ fn ensure_schedule_in_transaction(
       use schedule_entries <- result.try(load_schedule_entries(connection))
       Ok(#(conflicts, schedule_entries))
     }
-    False -> refresh_schedule_in_transaction(connection)
+    False -> refresh_schedule_in_transaction(connection, today)
+  }
+}
+
+fn ensure_prolog_schedule_in_transaction(
+  connection: sqlight.Connection,
+  today: calendar.Date,
+) -> Result(
+  #(
+    List(Vendor),
+    List(scheduler.StoredEntry),
+    List(Conflict),
+    List(ScheduleEntry),
+  ),
+  AppError,
+) {
+  use schedule_is_current <- result.try(reuse_prolog_schedule_on(
+    connection,
+    today,
+  ))
+  use vendors <- result.try(load_vendors(connection))
+  case schedule_is_current {
+    True -> {
+      use stored_entries <- result.try(load_prolog_stored_entries(connection))
+      use conflicts <- result.try(load_prolog_schedule_conflicts(connection))
+      use schedule_entries <- result.try(load_prolog_schedule_entries(
+        connection,
+      ))
+      Ok(#(vendors, stored_entries, conflicts, schedule_entries))
+    }
+    False -> {
+      use settings <- result.try(load_settings(connection))
+      let courses = list.flat_map(vendors, fn(vendor) { vendor.courses })
+      use #(stored_entries, conflicts, schedule_entries) <- result.try(
+        prolog_rebuild_cached(connection, courses, settings, today),
+      )
+      use _ <- result.try(persist_prolog_schedule_entries(
+        connection,
+        stored_entries,
+        date.to_iso(today),
+      ))
+      use _ <- result.try(persist_prolog_schedule_conflicts(
+        connection,
+        conflicts,
+      ))
+      Ok(#(vendors, stored_entries, conflicts, schedule_entries))
+    }
   }
 }
 
@@ -779,6 +846,59 @@ fn persist_schedule_conflicts(
   })
 }
 
+fn persist_prolog_schedule_entries(
+  connection: sqlight.Connection,
+  stored_entries: List(scheduler.StoredEntry),
+  generated_for: String,
+) -> Result(Nil, AppError) {
+  use _ <- result.try(exec(connection, "delete from prolog_schedule_entries"))
+  use _ <- result.try(
+    list.try_fold(stored_entries, Nil, fn(_, entry) {
+      exec_with_args(
+        "
+        insert into prolog_schedule_entries (
+          module_id,
+          scheduled_date,
+          slot_index
+        ) values (?, ?, ?)
+        ",
+        [
+          sqlight.int(entry.module_id),
+          sqlight.text(date.to_iso(entry.scheduled_date)),
+          sqlight.int(entry.slot_index),
+        ],
+        connection,
+      )
+    }),
+  )
+  set_prolog_schedule_generated_for(connection, Some(generated_for))
+}
+
+fn persist_prolog_schedule_conflicts(
+  connection: sqlight.Connection,
+  conflicts: List(Conflict),
+) -> Result(Nil, AppError) {
+  use _ <- result.try(exec(connection, "delete from prolog_schedule_conflicts"))
+  list.try_fold(conflicts, Nil, fn(_, conflict) {
+    exec_with_args(
+      "
+      insert into prolog_schedule_conflicts (course_id, message)
+      values (?, ?)
+      ",
+      [sqlight.int(conflict.course_id), sqlight.text(conflict.message)],
+      connection,
+    )
+  })
+}
+
+fn invalidate_prolog_schedule(
+  connection: sqlight.Connection,
+) -> Result(Nil, AppError) {
+  use _ <- result.try(exec(connection, "delete from prolog_schedule_entries"))
+  use _ <- result.try(exec(connection, "delete from prolog_schedule_conflicts"))
+  set_prolog_schedule_generated_for(connection, None)
+}
+
 /// Vendor and course names are joined at read time rather than stored, so a
 /// rename after the schedule was generated is still reflected in conflicts.
 fn load_schedule_conflicts(
@@ -808,20 +928,96 @@ fn load_schedule_conflicts(
   |> Ok
 }
 
+fn load_prolog_schedule_conflicts(
+  connection: sqlight.Connection,
+) -> Result(List(Conflict), AppError) {
+  use rows <- result.try(query(
+    "
+    select psc.course_id, v.name, c.name, psc.message
+    from prolog_schedule_conflicts psc
+    join courses c on c.id = psc.course_id
+    join vendors v on v.id = c.vendor_id
+    order by psc.rowid
+    ",
+    [],
+    conflict_row_decoder(),
+    connection,
+  ))
+  rows
+  |> list.map(fn(row) {
+    model.Conflict(
+      course_id: row.0,
+      vendor_name: row.1,
+      course_name: row.2,
+      message: row.3,
+    )
+  })
+  |> Ok
+}
+
 fn apply_schedule_mutation(
   connection: sqlight.Connection,
   schedule_mutation: ScheduleMutation,
+  today: calendar.Date,
 ) -> Result(Nil, AppError) {
   case schedule_mutation {
     KeepStoredSchedule -> Ok(Nil)
-    RebuildStoredSchedule ->
-      refresh_schedule_in_transaction(connection)
-      |> result.map(fn(_) { Nil })
-    // Removing a single completed module from the stored schedule cannot
-    // change which courses are in conflict, so the persisted conflicts are
-    // deliberately left untouched here.
-    RemoveStoredModuleFromSchedule(module_id) ->
+    RebuildStoredSchedule -> {
+      use _ <- result.try(refresh_schedule_in_transaction(connection, today))
+      invalidate_prolog_schedule(connection)
+    }
+    CompleteModuleInStoredSchedules(module_id) -> {
+      use _ <- result.try(apply_gleam_module_completion(
+        connection,
+        module_id,
+        today,
+      ))
+      apply_prolog_module_completion(connection, module_id, today)
+    }
+  }
+}
+
+fn apply_gleam_module_completion(
+  connection: sqlight.Connection,
+  module_id: Int,
+  today: calendar.Date,
+) -> Result(Nil, AppError) {
+  let today_iso = date.to_iso(today)
+  use schedule_is_current <- result.try(reuse_stored_schedule_on(
+    connection,
+    today,
+  ))
+  use scheduled_date <- result.try(load_schedule_entry_date(
+    connection,
+    module_id,
+  ))
+  case schedule_is_current, scheduled_date {
+    True, Some(scheduled_date) if scheduled_date == today_iso ->
       delete_schedule_entry(connection, module_id)
+    _, _ ->
+      refresh_schedule_in_transaction(connection, today)
+      |> result.map(fn(_) { Nil })
+  }
+}
+
+fn apply_prolog_module_completion(
+  connection: sqlight.Connection,
+  module_id: Int,
+  today: calendar.Date,
+) -> Result(Nil, AppError) {
+  let today_iso = date.to_iso(today)
+  use schedule_is_current <- result.try(reuse_prolog_schedule_on(
+    connection,
+    today,
+  ))
+  use scheduled_date <- result.try(load_prolog_schedule_entry_date(
+    connection,
+    module_id,
+  ))
+  case schedule_is_current, scheduled_date {
+    True, Some(scheduled_date) if scheduled_date == today_iso ->
+      delete_prolog_schedule_entry(connection, module_id)
+    _, _ -> invalidate_prolog_schedule(connection)
   }
 }
 
@@ -849,12 +1045,93 @@ fn load_settings(connection: sqlight.Connection) -> Result(Settings, AppError) {
   })
 }
 
-fn schedule_generated_for_date(
+/// A saved schedule remains valid across midnight when every entry before the
+/// new day has been completed. In that case only its cache marker advances;
+/// future dates, slots, and conflicts stay untouched.
+fn reuse_stored_schedule_on(
   connection: sqlight.Connection,
-  expected_date: String,
+  today: calendar.Date,
 ) -> Result(Bool, AppError) {
-  load_schedule_generated_for(connection)
-  |> result.map(fn(generated_for) { generated_for == Some(expected_date) })
+  let today_iso = date.to_iso(today)
+  use generated_for <- result.try(load_schedule_generated_for(connection))
+  case generated_for {
+    Some(generated_for) if generated_for == today_iso -> Ok(True)
+    Some(generated_for) ->
+      case date.parse_iso(generated_for) {
+        Ok(generated_date) ->
+          case date.compare(generated_date, today) {
+            Lt -> {
+              use overdue_count <- result.try(query_one(
+                "
+                  select count(*)
+                  from schedule_entries se
+                  join modules m on m.id = se.module_id
+                  where m.completed_at is null and se.scheduled_date < ?
+                  ",
+                [sqlight.text(today_iso)],
+                int_decoder(),
+                connection,
+              ))
+              case overdue_count == 0 {
+                True -> {
+                  use _ <- result.try(set_schedule_generated_for(
+                    connection,
+                    Some(today_iso),
+                  ))
+                  Ok(True)
+                }
+                False -> Ok(False)
+              }
+            }
+            _ -> Ok(False)
+          }
+        _ -> Ok(False)
+      }
+    None -> Ok(False)
+  }
+}
+
+fn reuse_prolog_schedule_on(
+  connection: sqlight.Connection,
+  today: calendar.Date,
+) -> Result(Bool, AppError) {
+  let today_iso = date.to_iso(today)
+  use generated_for <- result.try(load_prolog_schedule_generated_for(connection))
+  case generated_for {
+    Some(generated_for) if generated_for == today_iso -> Ok(True)
+    Some(generated_for) ->
+      case date.parse_iso(generated_for) {
+        Ok(generated_date) ->
+          case date.compare(generated_date, today) {
+            Lt -> {
+              use overdue_count <- result.try(query_one(
+                "
+                  select count(*)
+                  from prolog_schedule_entries pse
+                  join modules m on m.id = pse.module_id
+                  where m.completed_at is null and pse.scheduled_date < ?
+                  ",
+                [sqlight.text(today_iso)],
+                int_decoder(),
+                connection,
+              ))
+              case overdue_count == 0 {
+                True -> {
+                  use _ <- result.try(set_prolog_schedule_generated_for(
+                    connection,
+                    Some(today_iso),
+                  ))
+                  Ok(True)
+                }
+                False -> Ok(False)
+              }
+            }
+            _ -> Ok(False)
+          }
+        _ -> Ok(False)
+      }
+    None -> Ok(False)
+  }
 }
 
 fn load_schedule_generated_for(
@@ -876,6 +1153,32 @@ fn set_schedule_generated_for(
     "
     update app_settings
     set schedule_generated_for = ?
+    where id = 1
+    ",
+    [sqlight.nullable(sqlight.text, generated_for)],
+    connection,
+  )
+}
+
+fn load_prolog_schedule_generated_for(
+  connection: sqlight.Connection,
+) -> Result(Option(String), AppError) {
+  query_one(
+    "select prolog_schedule_generated_for from app_settings where id = 1",
+    [],
+    optional_string_decoder(),
+    connection,
+  )
+}
+
+fn set_prolog_schedule_generated_for(
+  connection: sqlight.Connection,
+  generated_for: Option(String),
+) -> Result(Nil, AppError) {
+  exec_with_args(
+    "
+    update app_settings
+    set prolog_schedule_generated_for = ?
     where id = 1
     ",
     [sqlight.nullable(sqlight.text, generated_for)],
@@ -1119,6 +1422,69 @@ fn load_schedule_entries(
       join vendors v on v.id = c.vendor_id
       where m.completed_at is null
       order by se.scheduled_date, se.slot_index, se.module_id
+      ",
+    [],
+    schedule_entry_row_decoder(),
+    connection,
+  ))
+  rows
+  |> list.try_map(fn(row) {
+    use scheduled_date <- result.try(date.parse_iso(row.4))
+    Ok(ScheduleEntry(
+      module_id: row.0,
+      vendor_name: row.1,
+      course_name: row.2,
+      module_name: row.3,
+      scheduled_date: scheduled_date,
+      slot_index: row.5,
+    ))
+  })
+}
+
+fn load_prolog_stored_entries(
+  connection: sqlight.Connection,
+) -> Result(List(scheduler.StoredEntry), AppError) {
+  use rows <- result.try(query(
+    "
+      select pse.module_id, pse.scheduled_date, pse.slot_index
+      from prolog_schedule_entries pse
+      join modules m on m.id = pse.module_id
+      where m.completed_at is null
+      order by pse.scheduled_date, pse.slot_index, pse.module_id
+      ",
+    [],
+    stored_entry_row_decoder(),
+    connection,
+  ))
+  rows
+  |> list.try_map(fn(row) {
+    use scheduled_date <- result.try(date.parse_iso(row.1))
+    Ok(scheduler.StoredEntry(
+      module_id: row.0,
+      scheduled_date: scheduled_date,
+      slot_index: row.2,
+    ))
+  })
+}
+
+fn load_prolog_schedule_entries(
+  connection: sqlight.Connection,
+) -> Result(List(ScheduleEntry), AppError) {
+  use rows <- result.try(query(
+    "
+      select
+        pse.module_id,
+        v.name,
+        c.name,
+        m.name,
+        pse.scheduled_date,
+        pse.slot_index
+      from prolog_schedule_entries pse
+      join modules m on m.id = pse.module_id
+      join courses c on c.id = m.course_id
+      join vendors v on v.id = c.vendor_id
+      where m.completed_at is null
+      order by pse.scheduled_date, pse.slot_index, pse.module_id
       ",
     [],
     schedule_entry_row_decoder(),
@@ -1477,6 +1843,60 @@ fn delete_schedule_entry(
   )
 }
 
+fn delete_prolog_schedule_entry(
+  connection: sqlight.Connection,
+  module_id: Int,
+) -> Result(Nil, AppError) {
+  exec_with_args(
+    "delete from prolog_schedule_entries where module_id = ?",
+    [sqlight.int(module_id)],
+    connection,
+  )
+}
+
+fn load_schedule_entry_date(
+  connection: sqlight.Connection,
+  module_id: Int,
+) -> Result(Option(String), AppError) {
+  load_optional_schedule_entry_date(
+    connection,
+    "select scheduled_date from schedule_entries where module_id = ?",
+    module_id,
+  )
+}
+
+fn load_prolog_schedule_entry_date(
+  connection: sqlight.Connection,
+  module_id: Int,
+) -> Result(Option(String), AppError) {
+  load_optional_schedule_entry_date(
+    connection,
+    "
+    select scheduled_date
+    from prolog_schedule_entries
+    where module_id = ?
+    ",
+    module_id,
+  )
+}
+
+fn load_optional_schedule_entry_date(
+  connection: sqlight.Connection,
+  statement: String,
+  module_id: Int,
+) -> Result(Option(String), AppError) {
+  use rows <- result.try(query(
+    statement,
+    [sqlight.int(module_id)],
+    string_decoder(),
+    connection,
+  ))
+  case rows {
+    [scheduled_date, ..] -> Ok(Some(scheduled_date))
+    [] -> Ok(None)
+  }
+}
+
 fn expand_modules(input: CourseModulesInput) -> Result(List(String), AppError) {
   case input {
     ExplicitModules(modules) ->
@@ -1612,9 +2032,9 @@ fn range_inclusive(start: Int, finish: Int) -> List(Int) {
   }
 }
 
-fn completed_at_value(done: Bool) -> Option(String) {
+fn completed_at_value(done: Bool, today_iso: String) -> Option(String) {
   case done {
-    True -> Some(date.to_iso(date.today()))
+    True -> Some(today_iso)
     False -> None
   }
 }
@@ -1623,10 +2043,7 @@ fn schedule_mutation_for_module_update(
   module_id: Int,
   completed: Option(Bool),
   order_changed: Bool,
-  schedule_is_current: Bool,
   current_completed_at: Option(String),
-  current_scheduled_date: Option(String),
-  today_iso: String,
 ) -> ScheduleMutation {
   case order_changed {
     True -> RebuildStoredSchedule
@@ -1636,12 +2053,7 @@ fn schedule_mutation_for_module_update(
         Some(True) ->
           case current_completed_at {
             Some(_) -> KeepStoredSchedule
-            None ->
-              case schedule_is_current, current_scheduled_date {
-                True, Some(scheduled_date) if scheduled_date == today_iso ->
-                  RemoveStoredModuleFromSchedule(module_id)
-                _, _ -> RebuildStoredSchedule
-              }
+            None -> CompleteModuleInStoredSchedules(module_id)
           }
         None -> KeepStoredSchedule
       }
@@ -1799,6 +2211,15 @@ fn schedule_entry_row_decoder() -> decode.Decoder(
   }
 }
 
+fn stored_entry_row_decoder() -> decode.Decoder(#(Int, String, Int)) {
+  {
+    use module_id <- decode.field(0, decode.int)
+    use scheduled_date <- decode.field(1, decode.string)
+    use slot_index <- decode.field(2, decode.int)
+    decode.success(#(module_id, scheduled_date, slot_index))
+  }
+}
+
 fn pair_int_string_decoder() -> decode.Decoder(#(Int, String)) {
   {
     use id <- decode.field(0, decode.int)
@@ -1855,11 +2276,18 @@ fn ensure_app_settings_columns(
       add column deadline_slack_days integer not null default 0
       ",
   ))
-  ensure_app_settings_column(
+  use _ <- result.try(ensure_app_settings_column(
     connection,
     "
     alter table app_settings
     add column schedule_generated_for text
+    ",
+  ))
+  ensure_app_settings_column(
+    connection,
+    "
+    alter table app_settings
+    add column prolog_schedule_generated_for text
     ",
   )
 }
@@ -1966,7 +2394,8 @@ create table if not exists app_settings (
   id integer primary key,
   include_weekends integer not null,
   deadline_slack_days integer not null default 0,
-  schedule_generated_for text
+  schedule_generated_for text,
+  prolog_schedule_generated_for text
 );
 
 create table if not exists schedule_conflicts (
@@ -1978,5 +2407,16 @@ create table if not exists prolog_cache (
   id integer primary key check (id = 1),
   request text not null,
   response text not null
+);
+
+create table if not exists prolog_schedule_entries (
+  module_id integer primary key references modules(id) on delete cascade,
+  scheduled_date text not null,
+  slot_index integer not null
+);
+
+create table if not exists prolog_schedule_conflicts (
+  course_id integer not null references courses(id) on delete cascade,
+  message text not null
 );
 "

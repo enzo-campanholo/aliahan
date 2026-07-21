@@ -950,9 +950,10 @@ pub fn completing_todays_module_keeps_today_blank_across_reads_and_name_patch_te
   )
 }
 
-pub fn completing_module_refreshes_prolog_preview_test() {
-  with_isolated_store("completing_module_refreshes_prolog_preview", fn(_, _) {
+pub fn completing_todays_prolog_module_keeps_future_schedule_test() {
+  with_isolated_store("completing_todays_prolog_module", fn(_, _) {
     let today = date.today()
+    let tomorrow = date.day_after(today)
 
     let vendor = seed_weekend_vendor()
     let assert Ok(Nil) =
@@ -967,6 +968,8 @@ pub fn completing_module_refreshes_prolog_preview_test() {
     let assert Ok(before) =
       store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
     assert schedule_module_names_on(before, today) == ["First"]
+    assert schedule_module_names_on(before, tomorrow) == ["Second"]
+    let saved_schedule = stored_prolog_schedule_rows()
     let course = course_named("Vendor", "Prolog completion")
     let assert [first, _] = course.modules
 
@@ -974,7 +977,93 @@ pub fn completing_module_refreshes_prolog_preview_test() {
 
     let assert Ok(after) =
       store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
-    assert schedule_module_names_on(after, today) == ["Second"]
+    assert schedule_module_names_on(after, today) == []
+    assert schedule_module_names_on(after, tomorrow) == ["Second"]
+    assert stored_prolog_schedule_rows()
+      == list.filter(saved_schedule, fn(row) { row.0 != first.id })
+  })
+}
+
+pub fn prolog_day_rollover_keeps_future_schedule_when_past_work_is_done_test() {
+  with_isolated_store("prolog_day_rollover_keeps_future_schedule", fn(_, _) {
+    let today = date.today()
+    let tomorrow = date.day_after(today)
+    let yesterday_iso = date.to_iso(date.day_before(today))
+
+    let vendor = seed_weekend_vendor()
+    let assert Ok(Nil) =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Prolog rollover",
+        deadline: tomorrow,
+        prerequisites: [],
+        modules: model.ExplicitModules(["Past", "Future"]),
+      ))
+    let assert Ok(_) =
+      store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
+    let course = course_named("Vendor", "Prolog rollover")
+    let assert [past, _] = course.modules
+    let assert Ok(Nil) = store.set_module_completed(past.id, True)
+    let saved_schedule = stored_prolog_schedule_rows()
+
+    let assert Ok(connection) = sqlight.open(store.database_path())
+    let assert Ok(_) = sqlight.exec("
+      update modules
+      set completed_at = '" <> yesterday_iso <> "'
+      where id = " <> int.to_string(past.id) <> ";
+
+      update app_settings
+      set prolog_schedule_generated_for = '" <> yesterday_iso <> "'
+      where id = 1
+      ", on: connection)
+    let assert Ok(_) = sqlight.close(connection)
+
+    let assert Ok(Nil) = store.initialise()
+    let assert Ok(rolled_forward) =
+      store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
+    assert schedule_module_names_on(rolled_forward, today) == []
+    assert schedule_module_names_on(rolled_forward, tomorrow) == ["Future"]
+    assert stored_prolog_schedule_rows() == saved_schedule
+    assert stored_prolog_schedule_generated_for() == Some(date.to_iso(today))
+  })
+}
+
+pub fn prolog_day_rollover_rebuilds_unfinished_past_work_test() {
+  with_isolated_store("prolog_day_rollover_rebuilds_overdue", fn(_, _) {
+    let today = date.today()
+    let tomorrow = date.day_after(today)
+    let yesterday_iso = date.to_iso(date.day_before(today))
+
+    let vendor = seed_weekend_vendor()
+    let assert Ok(Nil) =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Prolog catch up",
+        deadline: tomorrow,
+        prerequisites: [],
+        modules: model.ExplicitModules(["Overdue", "Future"]),
+      ))
+    let assert Ok(_) =
+      store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
+    let course = course_named("Vendor", "Prolog catch up")
+    let assert [overdue, _] = course.modules
+
+    let assert Ok(connection) = sqlight.open(store.database_path())
+    let assert Ok(_) = sqlight.exec("
+      update prolog_schedule_entries
+      set scheduled_date = '" <> yesterday_iso <> "'
+      where module_id = " <> int.to_string(overdue.id) <> ";
+
+      update app_settings
+      set prolog_schedule_generated_for = '" <> yesterday_iso <> "'
+      where id = 1
+      ", on: connection)
+    let assert Ok(_) = sqlight.close(connection)
+
+    let assert Ok(rebuilt) =
+      store.bootstrap_with_scheduler("week", today, None, model.PrologScheduler)
+    assert schedule_module_names_on(rebuilt, today) == ["Overdue"]
+    assert schedule_module_names_on(rebuilt, tomorrow) == ["Future"]
   })
 }
 
@@ -1078,8 +1167,8 @@ pub fn completing_non_today_module_rebuilds_and_unblocks_future_work_test() {
   )
 }
 
-pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
-  with_isolated_store("stale_schedule_metadata_rebuilds_blank_today", fn(_, _) {
+pub fn day_rollover_keeps_future_schedule_when_past_work_is_done_test() {
+  with_isolated_store("day_rollover_keeps_future_schedule", fn(_, _) {
     let today = date.today()
     let tomorrow = date.day_after(today)
 
@@ -1100,9 +1189,29 @@ pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
     let blank_today = bootstrap_for(today)
     assert schedule_module_names_on(blank_today, today) == []
     assert schedule_module_names_on(blank_today, tomorrow) == ["Tomorrow"]
+    let saved_schedule = stored_schedule_rows()
 
     let assert Ok(connection) = sqlight.open(store.database_path())
     let stale_date = date.to_iso(date.day_before(today))
+    let assert Ok(_) = sqlight.exec("
+        update modules
+        set completed_at = '" <> stale_date <> "'
+        where id = " <> int.to_string(today_module.id) <> ";
+
+        update app_settings
+        set schedule_generated_for = '" <> stale_date <> "'
+        where id = 1
+        ", on: connection)
+    let assert Ok(_) = sqlight.close(connection)
+
+    let rolled_forward = bootstrap_for(today)
+    assert schedule_module_names_on(rolled_forward, today) == []
+    assert schedule_module_names_on(rolled_forward, tomorrow) == ["Tomorrow"]
+    assert stored_schedule_rows() == saved_schedule
+    assert stored_schedule_generated_for() == Some(date.to_iso(today))
+
+    // Starting the server after the next rollover follows the same path.
+    let assert Ok(connection) = sqlight.open(store.database_path())
     let assert Ok(_) = sqlight.exec("
         update app_settings
         set schedule_generated_for = '" <> stale_date <> "'
@@ -1110,10 +1219,98 @@ pub fn stale_schedule_metadata_rebuilds_blank_today_test() {
         ", on: connection)
     let assert Ok(_) = sqlight.close(connection)
 
-    let rebuilt = bootstrap_for(today)
-    assert schedule_module_names_on(rebuilt, today) == ["Tomorrow"]
-    assert schedule_module_names_on(rebuilt, tomorrow) == []
+    let assert Ok(Nil) = store.initialise()
+    assert stored_schedule_rows() == saved_schedule
+    assert stored_schedule_generated_for() == Some(date.to_iso(today))
   })
+}
+
+pub fn day_rollover_rebuilds_when_past_work_is_unfinished_test() {
+  with_isolated_store("day_rollover_rebuilds_overdue_work", fn(_, _) {
+    let today = date.today()
+    let yesterday = date.day_before(today)
+    let tomorrow = date.day_after(today)
+
+    let vendor = seed_weekend_vendor()
+    let assert Ok(Nil) =
+      store.create_course(model.NewCourseInput(
+        vendor_id: vendor.id,
+        name: "Catch up",
+        deadline: tomorrow,
+        prerequisites: [],
+        modules: model.ExplicitModules(["Overdue", "Tomorrow"]),
+      ))
+
+    let course = course_named("Vendor", "Catch up")
+    let assert [overdue, future] = course.modules
+    let assert Ok(connection) = sqlight.open(store.database_path())
+    let yesterday_iso = date.to_iso(yesterday)
+    let assert Ok(_) = sqlight.exec("
+        update schedule_entries
+        set scheduled_date = '" <> yesterday_iso <> "'
+        where module_id = " <> int.to_string(overdue.id) <> ";
+
+        update app_settings
+        set schedule_generated_for = '" <> yesterday_iso <> "'
+        where id = 1
+        ", on: connection)
+    let assert Ok(_) = sqlight.close(connection)
+
+    let rebuilt = bootstrap_for(today)
+    assert schedule_module_names_on(rebuilt, today) == ["Overdue"]
+    assert schedule_module_names_on(rebuilt, tomorrow) == ["Tomorrow"]
+    assert stored_schedule_rows()
+      == [
+        #(overdue.id, date.to_iso(today), 0),
+        #(future.id, date.to_iso(tomorrow), 0),
+      ]
+  })
+}
+
+pub fn current_day_completion_after_rollover_keeps_future_schedule_test() {
+  with_isolated_store(
+    "completion_after_rollover_keeps_future_schedule",
+    fn(_, _) {
+      let today = date.today()
+      let tomorrow = date.day_after(today)
+      let yesterday_iso = date.to_iso(date.day_before(today))
+
+      let vendor = seed_weekend_vendor()
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Three days",
+          deadline: date.day_after(tomorrow),
+          prerequisites: [],
+          modules: model.ExplicitModules(["Past", "Today", "Future"]),
+        ))
+
+      let course = course_named("Vendor", "Three days")
+      let assert [past, current, future] = course.modules
+      let assert Ok(Nil) = store.set_module_completed(past.id, True)
+
+      // Move the saved plan over midnight without asking the scheduler to run.
+      let assert Ok(connection) = sqlight.open(store.database_path())
+      let assert Ok(_) = sqlight.exec("
+        update modules
+        set completed_at = '" <> yesterday_iso <> "'
+        where id = " <> int.to_string(past.id) <> ";
+
+        update schedule_entries
+        set scheduled_date = date(scheduled_date, '-1 day');
+
+        update app_settings
+        set schedule_generated_for = '" <> yesterday_iso <> "'
+        where id = 1
+        ", on: connection)
+      let assert Ok(_) = sqlight.close(connection)
+
+      let assert Ok(Nil) = store.set_module_completed(current.id, True)
+
+      assert stored_schedule_rows() == [#(future.id, date.to_iso(tomorrow), 0)]
+      assert stored_schedule_generated_for() == Some(date.to_iso(today))
+    },
+  )
 }
 
 pub fn cached_bootstrap_returns_conflicts_from_the_rebuild_test() {
@@ -1131,15 +1328,18 @@ pub fn cached_bootstrap_returns_conflicts_from_the_rebuild_test() {
           modules: model.ExplicitModules(["Late"]),
         ))
 
-      // Mark the persisted schedule as stale so the next bootstrap rebuilds
-      // it, and the one after that is served from the cache.
+      // A missing marker is an untrusted cache, so the next bootstrap rebuilds
+      // it and the one after that is served from the cache.
       let assert Ok(connection) = sqlight.open(store.database_path())
-      let stale_date = date.to_iso(date.day_before(today))
-      let assert Ok(_) = sqlight.exec("
+      let assert Ok(_) =
+        sqlight.exec(
+          "
         update app_settings
-        set schedule_generated_for = '" <> stale_date <> "'
+        set schedule_generated_for = null
         where id = 1
-        ", on: connection)
+        ",
+          on: connection,
+        )
       let assert Ok(_) = sqlight.close(connection)
 
       let rebuilt = bootstrap_for(today)
@@ -1172,7 +1372,7 @@ pub fn prolog_bootstrap_reuses_cached_solver_response_test() {
         store.bootstrap_with_scheduler(
           "week",
           today,
-          None,
+          Some(today),
           model.PrologScheduler,
         )
       assert schedule_module_names_on(first, today) == ["Only"]
@@ -1181,7 +1381,7 @@ pub fn prolog_bootstrap_reuses_cached_solver_response_test() {
         store.bootstrap_with_scheduler(
           "week",
           today,
-          None,
+          Some(today),
           model.PrologScheduler,
         )
       assert second == first
@@ -1210,7 +1410,7 @@ pub fn prolog_bootstrap_reuses_cached_solver_response_test() {
         store.bootstrap_with_scheduler(
           "week",
           today,
-          None,
+          Some(today),
           model.PrologScheduler,
         )
       assert schedule_module_names_on(tampered, today) == []
@@ -1294,6 +1494,46 @@ pub fn prolog_preview_does_not_replace_the_stored_gleam_schedule_test() {
       let persisted = course_named("Vendor", "Prolog preview")
       let assert [persisted_module] = persisted.modules
       assert persisted_module.scheduled_date == Some(today)
+    },
+  )
+}
+
+pub fn prolog_custom_start_does_not_replace_live_prolog_schedule_test() {
+  with_isolated_store(
+    "prolog_custom_start_does_not_replace_live_schedule",
+    fn(_, _) {
+      let today = date.today()
+      let simulated_start = date.day_after(today)
+
+      let vendor = seed_weekend_vendor()
+      let assert Ok(Nil) =
+        store.create_course(model.NewCourseInput(
+          vendor_id: vendor.id,
+          name: "Stable Prolog plan",
+          deadline: date.add_days(today, 5),
+          prerequisites: [],
+          modules: model.ExplicitModules(["First", "Second"]),
+        ))
+
+      let assert Ok(_) =
+        store.bootstrap_with_scheduler(
+          "week",
+          today,
+          None,
+          model.PrologScheduler,
+        )
+      let saved_schedule = stored_prolog_schedule_rows()
+
+      let assert Ok(preview) =
+        store.bootstrap_with_scheduler(
+          "week",
+          simulated_start,
+          Some(simulated_start),
+          model.PrologScheduler,
+        )
+      assert schedule_module_names_on(preview, simulated_start) == ["First"]
+      assert stored_prolog_schedule_rows() == saved_schedule
+      assert stored_prolog_schedule_generated_for() == Some(date.to_iso(today))
     },
   )
 }
@@ -1746,6 +1986,71 @@ pub fn initialise_succeeds_when_snapshot_export_path_is_invalid_test() {
   let _ = simplifile.delete(base)
 }
 
+pub fn initialise_migrates_existing_store_for_live_prolog_schedule_test() {
+  with_isolated_store("migrate_live_prolog_schedule", fn(_, _) {
+    let assert Ok(connection) = sqlight.open(store.database_path())
+    let assert Ok(_) =
+      sqlight.exec(
+        "
+      create table app_settings (
+        id integer primary key,
+        include_weekends integer not null,
+        deadline_slack_days integer not null default 0,
+        schedule_generated_for text
+      );
+
+      insert into app_settings (
+        id,
+        include_weekends,
+        deadline_slack_days,
+        schedule_generated_for
+      ) values (1, 1, 3, null);
+      ",
+        on: connection,
+      )
+    let assert Ok(_) = sqlight.close(connection)
+
+    let assert Ok(Nil) = store.initialise()
+    let data = bootstrap_data()
+    assert data.settings.include_weekends == True
+    assert data.settings.deadline_slack_days == 3
+
+    let assert Ok(connection) = sqlight.open(store.database_path())
+    let count_decoder = decode.field(0, decode.int, decode.success)
+    let assert Ok([0]) =
+      sqlight.query(
+        "select count(*) from prolog_schedule_entries",
+        on: connection,
+        with: [],
+        expecting: count_decoder,
+      )
+    let assert Ok([0]) =
+      sqlight.query(
+        "select count(*) from prolog_schedule_conflicts",
+        on: connection,
+        with: [],
+        expecting: count_decoder,
+      )
+    let assert Ok([None]) =
+      sqlight.query(
+        "
+        select prolog_schedule_generated_for
+        from app_settings
+        where id = 1
+        ",
+        on: connection,
+        with: [],
+        expecting: decode.field(
+          0,
+          decode.optional(decode.string),
+          decode.success,
+        ),
+      )
+    let assert Ok(_) = sqlight.close(connection)
+    Nil
+  })
+}
+
 pub fn mutation_succeeds_when_snapshot_export_path_is_invalid_test() {
   let base = "/tmp/mutation_snapshot_export_path_invalid"
   let db_path = base <> "/aliahan.sqlite3"
@@ -1998,6 +2303,84 @@ fn schedule_module_names_on(
     int.compare(left.slot_index |> option_int, right.slot_index |> option_int)
   })
   |> list.map(fn(module) { module.name })
+}
+
+fn stored_schedule_rows() -> List(#(Int, String, Int)) {
+  let assert Ok(connection) = sqlight.open(store.database_path())
+  let decoder = {
+    use module_id <- decode.field(0, decode.int)
+    use scheduled_date <- decode.field(1, decode.string)
+    use slot_index <- decode.field(2, decode.int)
+    decode.success(#(module_id, scheduled_date, slot_index))
+  }
+  let assert Ok(rows) =
+    sqlight.query(
+      "
+        select module_id, scheduled_date, slot_index
+        from schedule_entries
+        order by scheduled_date, slot_index, module_id
+        ",
+      on: connection,
+      with: [],
+      expecting: decoder,
+    )
+  let assert Ok(_) = sqlight.close(connection)
+  rows
+}
+
+fn stored_prolog_schedule_rows() -> List(#(Int, String, Int)) {
+  let assert Ok(connection) = sqlight.open(store.database_path())
+  let decoder = {
+    use module_id <- decode.field(0, decode.int)
+    use scheduled_date <- decode.field(1, decode.string)
+    use slot_index <- decode.field(2, decode.int)
+    decode.success(#(module_id, scheduled_date, slot_index))
+  }
+  let assert Ok(rows) =
+    sqlight.query(
+      "
+        select module_id, scheduled_date, slot_index
+        from prolog_schedule_entries
+        order by scheduled_date, slot_index, module_id
+        ",
+      on: connection,
+      with: [],
+      expecting: decoder,
+    )
+  let assert Ok(_) = sqlight.close(connection)
+  rows
+}
+
+fn stored_schedule_generated_for() -> Option(String) {
+  let assert Ok(connection) = sqlight.open(store.database_path())
+  let decoder = decode.field(0, decode.optional(decode.string), decode.success)
+  let assert Ok([generated_for]) =
+    sqlight.query(
+      "select schedule_generated_for from app_settings where id = 1",
+      on: connection,
+      with: [],
+      expecting: decoder,
+    )
+  let assert Ok(_) = sqlight.close(connection)
+  generated_for
+}
+
+fn stored_prolog_schedule_generated_for() -> Option(String) {
+  let assert Ok(connection) = sqlight.open(store.database_path())
+  let decoder = decode.field(0, decode.optional(decode.string), decode.success)
+  let assert Ok([generated_for]) =
+    sqlight.query(
+      "
+      select prolog_schedule_generated_for
+      from app_settings
+      where id = 1
+      ",
+      on: connection,
+      with: [],
+      expecting: decoder,
+    )
+  let assert Ok(_) = sqlight.close(connection)
+  generated_for
 }
 
 fn option_int(value: Option(Int)) -> Int {
