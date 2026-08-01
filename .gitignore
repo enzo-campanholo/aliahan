@@ -4,6 +4,7 @@
 erl_crash.dump
 
 aliahan.sqlite3
+courses.toml
 
 node_modules/
 .pnpm-store/
