@@ -37,11 +37,11 @@ schedule_model(Courses, Today, Settings,
                Plans, Days, Vars, Conflicts, Score) :-
         valid_problem(Courses, Today, Settings),
         phrase(active_courses(Courses), Active),
-        schedulable_courses(Active, Courses, Today, Settings,
-                            Schedulable, Conflicts),
-        phrase(eligible_courses(Courses, Schedulable), Eligible),
-        schedule_model_(Schedulable, Eligible, Today, Settings,
-                        Plans, Days, Vars, Score).
+        problem_days(Active, Today, Settings, Days),
+        phrase(completed_states(Courses), Completed),
+        classify_courses(Active, Completed, Days, Schedulable, Conflicts),
+        schedule_model_(Schedulable, Completed, Days, Settings,
+                        Plans, Vars, Score).
 
 /*  Branch-and-bound over all three objectives at once restarts the
     whole search for every 1-unit improvement and can take hours on
@@ -80,23 +80,19 @@ spacing_search(Vars, Spacing) :-
               time_limit_exceeded,
               fail).
 
-schedule_model_([], _, _, _, [], [], [], score(0, 0, 0)).
-schedule_model_([Course|Courses], AllCourses, Today, Settings,
-                Plans, Days, Vars, Score) :-
-        Active = [Course|Courses],
-        maplist(course_deadline_ordinal, Active, DeadlineOrdinals),
-        max_list(DeadlineOrdinals, LastOrdinal),
-        calendar_days(Today, LastOrdinal, Settings, Days),
-        maplist(optimistic_start(AllCourses), Active, Starts),
-        maplist(course_plan(Days, Settings), Starts, Active, Plans),
-        course_states(AllCourses, Plans, States),
+schedule_model_([], _, _, _, [], [], score(0, 0, 0)).
+schedule_model_([CourseStart|CourseStarts], Completed, Days, Settings,
+                Plans, Vars, Score) :-
+        maplist(course_plan(Days, Settings), [CourseStart|CourseStarts], Plans),
+        maplist(plan_state, Plans, ActiveStates),
+        append(Completed, ActiveStates, States),
         maplist(plan_constraints(States), Plans),
         plans_penalties(Plans, SpacingPenalties),
         maximum_fd(SpacingPenalties, Spacing),
         plans_variables(Plans, Vars),
         plans_overlap_lower_bound(Plans, ForcedOverlaps),
         plans_usable_day_count(Plans, UsableDays),
-        occupancy(Days, UsableDays, Vars, ForcedOverlaps, Overlaps, Peak),
+        occupancy(UsableDays, Vars, ForcedOverlaps, Overlaps, Peak),
         Score = score(Overlaps, Peak, Spacing).
 
 /*  Days past every course's latest allowed finish can host nothing, so
@@ -107,7 +103,7 @@ schedule_model_([Course|Courses], AllCourses, Today, Settings,
 plans_usable_day_count(Plans, UsableDays) :-
         maplist(plan_last_supremum, Plans, Suprema),
         max_list(Suprema, MaxIndex),
-        UsableDays is MaxIndex + 1.
+        UsableDays #= MaxIndex + 1.
 
 plan_last_supremum(plan(_, _, _, _, _, Last, _, _), Supremum) :-
         fd_sup(Last, Supremum).
@@ -178,16 +174,11 @@ active_course(Course) -->
         [Course].
 
 
-schedulable_courses([], _, _, _, [], []).
-schedulable_courses(Active, Courses, Today, Settings,
-                    Schedulable, Conflicts) :-
-        Active = [_|_],
-        maplist(course_deadline_ordinal, Active, DeadlineOrdinals),
-        max_list(DeadlineOrdinals, LastOrdinal),
-        calendar_days(Today, LastOrdinal, Settings, Days),
-        phrase(completed_states(Courses), Completed),
-        classify_courses(Active, Completed, Days,
-                         Schedulable, Conflicts).
+problem_days([], _, _, []).
+problem_days([Course|Courses], Today, Settings, Days) :-
+        maplist(course_deadline_ordinal, [Course|Courses], Ordinals),
+        max_list(Ordinals, LastOrdinal),
+        calendar_days(Today, LastOrdinal, Settings, Days).
 
 completed_states([]) --> [].
 completed_states([course(Id, _, _, [])|Courses]) -->
@@ -246,7 +237,7 @@ classify_course(Course, States, Days, State, Schedulable, Conflicts) :-
         index_at_most(Days, DeadlineOrdinal, -1, DeadlineIndex),
         (   Earliest =< DeadlineIndex
         ->  State = feasible(Earliest),
-            Schedulable = [Course],
+            Schedulable = [Course-Earliest],
             Conflicts = []
         ;   State = blocked,
             Schedulable = [],
@@ -259,31 +250,20 @@ prerequisite_earliest_start(States, Id, Start) :-
 
 earliest_start(done, 0).
 earliest_start(feasible(Last), Start) :-
-        Start is Last + 1.
-
-eligible_courses([], _) --> [].
-eligible_courses([Course|Courses], Schedulable) -->
-        eligible_course(Course, Schedulable),
-        eligible_courses(Courses, Schedulable).
-
-eligible_course(Course, _) -->
-        { Course = course(_, _, _, []) },
-        [Course].
-eligible_course(Course, Schedulable) -->
-        { Course = course(_, _, _, [_|_]),
-          memberchk(Course, Schedulable) },
-        [Course].
-eligible_course(Course, Schedulable) -->
-        { Course = course(_, _, _, [_|_]),
-          \+ memberchk(Course, Schedulable) },
-        [].
+        Start #= Last + 1.
+earliest_start(active(Last), Start) :-
+        Start #= Last + 1.
 
 
 course_deadline_ordinal(course(_, Deadline, _, _), Ordinal) :-
         date_ordinal(Deadline, Ordinal).
 
-course_plan(Days, settings(_, Slack), OptimisticStart,
-            course(Id, Deadline, Prerequisites, Modules),
+/*  Classification already supplies the earliest possible start: all
+    modules may share a day, so each unfinished prerequisite adds one day.
+    Reuse this bound for slack instead of traversing the graph again.
+*/
+course_plan(Days, settings(_, Slack),
+            course(Id, Deadline, Prerequisites, Modules)-OptimisticStart,
             plan(Id, Prerequisites, Modules, Dates,
                  First, Last, Preferred, _)) :-
         date_ordinal(Deadline, DeadlineOrdinal),
@@ -307,25 +287,7 @@ course_plan(Days, settings(_, Slack), OptimisticStart,
     the empty-window Preferred = -1) falls back to the true deadline.
 */
 slack_cap(OptimisticStart, Preferred, Last) :-
-        (   OptimisticStart =< Preferred
-        ->  Last #=< Preferred
-        ;   true
-        ).
-
-optimistic_start(Courses, course(_, _, Prerequisites, _), Start) :-
-        maplist(prerequisite_optimistic_start(Courses), Prerequisites,
-                Starts),
-        max_list([0|Starts], Start).
-
-prerequisite_optimistic_start(Courses, Id, Start) :-
-        course_with_id(Courses, Id, Course),
-        Course = course(_, _, _, Modules),
-        prerequisite_finish_start(Modules, Courses, Course, Start).
-
-prerequisite_finish_start([], _, _, 0).
-prerequisite_finish_start([_|_], Courses, Course, Start) :-
-        optimistic_start(Courses, Course, Start0),
-        Start is Start0 + 1.
+        OptimisticStart #=< Preferred #==> Last #=< Preferred.
 
 index_at_most([], _, Index, Index).
 index_at_most([day(Index0, _, Ordinal)|Days], Limit, _, Index) :-
@@ -335,24 +297,7 @@ index_at_most([day(_, _, Ordinal)|_], Limit, Index, Index) :-
         Ordinal #> Limit.
 
 
-course_states([], _, []).
-course_states([course(Id, _, _, Modules)|Courses], Plans,
-              [Id-State|States]) :-
-        module_state(Modules, Id, Plans, State),
-        course_states(Courses, Plans, States).
-
-module_state([], _, _, done).
-module_state([_|_], Id, Plans, active(Last)) :-
-        plan_with_id(Plans, Id, Plan),
-        Plan = plan(_, _, _, _, _, Last, _, _).
-
-plan_with_id([plan(Id, Prerequisites, Modules, Dates,
-                  First, Last, Preferred, Penalties)|_], Id,
-             plan(Id, Prerequisites, Modules, Dates,
-                  First, Last, Preferred, Penalties)).
-plan_with_id([plan(Id0, _, _, _, _, _, _, _)|Plans], Id, Plan) :-
-        dif(Id0, Id),
-        plan_with_id(Plans, Id, Plan).
+plan_state(plan(Id, _, _, _, _, Last, _, _), Id-active(Last)).
 
 state_with_id([Id-State|_], Id, State).
 state_with_id([Id0-_|States], Id, State) :-
@@ -363,21 +308,15 @@ state_with_id([Id0-_|States], Id, State) :-
 plan_constraints(States,
                  plan(_, Prerequisites, _, Dates,
                       First, _, Preferred, Penalties)) :-
-        maplist(prerequisite_candidate(States, First),
-                Prerequisites, Starts),
+        maplist(prerequisite_start(States), Prerequisites, Starts),
         maximum_fd([0|Starts], Earliest),
         First #>= Earliest,
         TargetEnd #= max(Earliest, Preferred),
         spacing_penalties_for(Dates, Earliest, TargetEnd, Penalties).
 
-prerequisite_candidate(States, First, Id, Start) :-
+prerequisite_start(States, Id, Start) :-
         state_with_id(States, Id, State),
-        prerequisite_state(State, First, Start).
-
-prerequisite_state(done, _, 0).
-prerequisite_state(active(Last), First, Start) :-
-        Last #< First,
-        Start #= Last + 1.
+        earliest_start(State, Start).
 
 maximum_fd([X], X).
 maximum_fd([X,Y|Xs], Maximum) :-
@@ -429,14 +368,15 @@ plan_overlap_lower_bound(
         length(Modules, ModuleCount),
         fd_inf(First, FirstInfimum),
         fd_sup(Last, LastSupremum),
-        Window is LastSupremum - FirstInfimum + 1,
-        LowerBound is max(0, ModuleCount - Window).
+        Window #= LastSupremum - FirstInfimum + 1,
+        LowerBound #= max(0, ModuleCount - Window).
 
-occupancy(Days, UsableDays, Vars, ForcedOverlaps, Overlaps, Peak) :-
+occupancy(UsableDays, Vars, ForcedOverlaps, Overlaps, Peak) :-
         length(Vars, ModuleCount),
-        same_length(Days, Counts),
+        length(Counts, UsableDays),
         Counts ins 0..ModuleCount,
-        days_indices(Days, Indices),
+        LastIndex #= UsableDays - 1,
+        numlist(0, LastIndex, Indices),
         pairs_keys_values(Cardinalities, Indices, Counts),
         global_cardinality(Vars, Cardinalities),
         maplist(overlap_count, Counts, Extra),
@@ -445,11 +385,6 @@ occupancy(Days, UsableDays, Vars, ForcedOverlaps, Overlaps, Peak) :-
         Overlaps #>= max(0, ModuleCount - UsableDays),
         Overlaps #>= ForcedOverlaps,
         Peak #>= (ModuleCount + UsableDays - 1) div UsableDays.
-
-days_indices(Days, Indices) :-
-        maplist(day_index, Days, Indices).
-
-day_index(day(Index, _, _), Index).
 
 overlap_count(Count, Extra) :-
         Extra #= max(0, Count - 1).

@@ -1,6 +1,7 @@
 :- begin_tests(scheduler).
 
 :- use_module(scheduler).
+:- use_module(library(clpfd)).
 
 
 test(respects_prerequisites) :-
@@ -208,6 +209,48 @@ test(rejects_a_prerequisite_chain_without_enough_days, [fail]) :-
         Courses = [course(a, date(2026,3,19), [], [a1]),
                    course(b, date(2026,3,19), [a], [b1])],
         schedule(Courses, date(2026,3,19), settings(weekends, 0), _).
+
+test(out_of_order_prerequisites_keep_the_slack_fallback) :-
+        Courses = [course(last, date(2026,3,21), [middle], [last_1]),
+                   course(middle, date(2026,3,20), [first], [middle_1]),
+                   course(first, date(2026,3,19), [], [first_1])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 1),
+                      Entries, [], score(0, 1, 0))),
+        Entries = [entry(first, first_1, date(2026,3,19), 0),
+                   entry(middle, middle_1, date(2026,3,20), 0),
+                   entry(last, last_1, date(2026,3,21), 0)].
+
+test(completed_course_unblocks_work_despite_its_blocked_ancestor) :-
+        Courses = [course(next, date(2026,3,20), [done], [next_1,next_2]),
+                   course(done, date(2026,3,18), [elapsed], []),
+                   course(elapsed, date(2026,3,18), [], [old])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 1),
+                      Entries, [conflict(elapsed, impossible)],
+                      score(1, 2, 0))),
+        Entries = [entry(next, next_1, date(2026,3,19), 0),
+                   entry(next, next_2, date(2026,3,19), 1)].
+
+test(all_courses_conflicted_yields_an_empty_schedule) :-
+        Courses = [course(blocked, date(2026,4,30), [elapsed], [next]),
+                   course(elapsed, date(2026,3,18), [], [old])],
+        once(schedule(Courses, date(2026,3,19), settings(weekends, 0),
+                      [], [conflict(elapsed, impossible),
+                           conflict(blocked, blocked)], score(0, 0, 0))).
+
+test(model_rejects_a_prerequisite_violation_before_search, [fail]) :-
+        Courses = [course(first, date(2026,3,21), [], [first_1]),
+                   course(next, date(2026,3,21), [first], [next_1])],
+        scheduler:schedule_model(Courses, date(2026,3,19),
+                                 settings(weekends, 0), _, _, Vars, [], _),
+        Vars = [First, Next],
+        Next #=< First.
+
+test(model_rejects_a_slack_violation_before_search, [fail]) :-
+        Courses = [course(c, date(2026,3,21), [], [one,two])],
+        scheduler:schedule_model(Courses, date(2026,3,19),
+                                 settings(weekends, 1), _, _, Vars, [], _),
+        Vars = [_, Last],
+        Last #> 1.
 
 
 entry_date(entry(_, _, Date, _), Date).

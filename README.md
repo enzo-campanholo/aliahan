@@ -46,6 +46,14 @@ whose prerequisites allow it to start early enough must finish at least
 `SlackDays` before its deadline; conflicts are still judged against the
 true deadline.
 
+The model follows Markus Triska's [The Power of Prolog](https://www.metalevel.at/prolog/clpfd)
+approach: state integer constraints separately from labeling. A feasibility
+pass computes prerequisite start bounds once, reports conflicts, and passes
+those bounds to the slack constraints. The model shares one calendar and
+counts occupancy only on reachable days. Search retains the bounded
+relaxation and timed spacing optimization for larger problems; it does not
+guarantee a globally optimal score.
+
 For example:
 
 ```prolog
